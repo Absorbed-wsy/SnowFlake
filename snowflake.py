@@ -95,11 +95,20 @@ TEMPLATE = """# 《[暂名]》创作笔记
 
 
 def find_config_path(base=None):
-    base = base or os.getcwd()
-    for name in ("snowflake.json", "config.json"):
-        p = os.path.join(base, name)
-        if os.path.isfile(p):
-            return p
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [base, script_dir, os.getcwd()]
+    seen = set()
+    for d in candidates:
+        if not d:
+            continue
+        d = os.path.abspath(d)
+        if d in seen:
+            continue
+        seen.add(d)
+        for name in ("snowflake.json", "config.json"):
+            p = os.path.join(d, name)
+            if os.path.isfile(p):
+                return p
     return None
 
 
@@ -141,7 +150,8 @@ def load_config(config_path):
     try:
         with open(config_path, encoding="utf-8") as f:
             data = json.load(f)
-    except Exception:
+    except Exception as e:
+        print("警告：配置文件解析失败，已使用默认配置：%s" % e)
         return False
     if data.get("dir"):
         NOTES_DIR = os.path.abspath(data["dir"])
