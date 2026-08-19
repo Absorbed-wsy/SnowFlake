@@ -238,7 +238,11 @@ function applyTheme(name){
   document.documentElement.removeAttribute("data-theme");
   if(name !== "light") document.documentElement.setAttribute("data-theme", name);
   var btn = document.getElementById("theme-toggle");
-  if(btn) btn.textContent = THEME_ICONS[name] || "\ud83c\udf19";
+  if(btn){
+    btn.textContent = THEME_ICONS[name] || "\ud83c\udf19";
+    btn.title = "切换主题（当前："+(THEME_LABELS[name]||"浅色")+"）";
+    btn.setAttribute("aria-label", btn.title);
+  }
 }
 
 function toggleTheme(){
@@ -325,13 +329,17 @@ function updateProgress(){
   var gs = document.getElementById("global-stats");
   if(gs){
     var s = doc.stats;
-    gs.innerHTML = '<span class="gs-item">\u603b\u5b57\u7b26<span class="gs-val">'+s.total_chars+'</span></span>';
+    var progress = s.progress || {};
+    gs.innerHTML = '<span class="gs-item"><span class="gs-label">全文字符</span><span class="gs-val">'+s.total_chars+'</span></span>'
+      + '<span class="gs-item"><span class="gs-label">已完成</span><span class="gs-val">'+(progress.done||0)+'/'+(progress.total||0)+'</span></span>';
   }
 }
 
 function renderSidebar(){
   var sb = document.getElementById("sidebar");
-  var h = '<div class="grp">\u57fa\u7840</div>';
+  var progress = (doc.stats && doc.stats.progress) || {};
+  var h = '<div class="sidebar-summary"><span>创作进度</span><strong>'+ (progress.done||0) +' / '+ (progress.total||0) +'</strong></div>';
+  h += '<div class="grp">\u57fa\u7840</div>';
   h += sideItem("preamble","\u6807\u9898\u4e0e\u7b80\u4ecb");
   h += '<div class="grp">\u96ea\u82b1\u6b65\u9aa4</div>';
   STEP_KEYS.forEach(function(k){
@@ -350,7 +358,7 @@ function renderTimeline(){
   var tl = document.getElementById("timeline");
   var h = '';
   doc.nodes.forEach(function(n, i){
-    if(i===0) h += '<div class="tl-phase"><span class="tl-phase-label">\u96ea\u82b1\u5c55\u5f00</span></div>';
+    if(i===0) h += '<div class="tl-phase"><span class="tl-phase-label">创作路径</span></div>';
     h += '<div class="node '+n.status+' '+(n.key===currentKey?'active':'')+'" data-key="'+n.key+'" title="'+escapeHtml(n.full)+'"><span class="dot"></span><span class="lbl">'+escapeHtml(n.short)+'</span></div>';
     if(i < doc.nodes.length-1) h += '<span class="arrow '+(i===0?'grow':'')+'">\u203a</span>';
   });
@@ -410,10 +418,10 @@ function renderBody(){
     } else if(isWritingSection){
       renderWritingEditor(area, sec);
     } else {
-      area.innerHTML = '<div class="toolbar"><span class="hint">\u76f4\u63a5\u7f16\u8f91 Markdown\uff0c\u53f3\u4fa7\u5b9e\u65f6\u9884\u89c8\u3002\u4fdd\u5b58\u5373\u56de\u5199\u5230\u5f53\u524d\u6587\u4ef6\u3002</span><span id="autosave-tag"></span></div>'
+      area.innerHTML = '<div class="toolbar"><span class="hint">修改 Markdown，右侧即时预览；保存后将回写当前文件。</span><span id="autosave-tag"></span></div>'
         + '<div class="panes">'
-        + '<textarea id="ta" oninput="onEdit()" spellcheck="false">'+escapeHtml(sec.body)+'</textarea>'
-        + '<div class="preview view" id="pv"></div>'
+        + '<section class="editor-pane source-pane"><div class="editor-pane-label"><span>Markdown 源稿</span><span>可直接编辑</span></div><textarea id="ta" oninput="onEdit()" spellcheck="false" aria-label="Markdown 源稿">'+escapeHtml(sec.body)+'</textarea></section>'
+        + '<section class="editor-pane preview-pane"><div class="editor-pane-label"><span>阅读预览</span><span>实时更新</span></div><div class="preview view" id="pv"></div></section>'
         + '</div>';
       refreshPreview();
     }

@@ -23,35 +23,44 @@
 </div>
 
 <div id="app-main" style="display:none">
-<header>
-  <button id="menu-btn">☰</button>
-  <span class="logo">❋</span>
-  <h1>雪花写作法工作台</h1>
+<header class="app-header">
+  <div class="brand">
+    <button id="menu-btn" aria-label="打开步骤导航">☰</button>
+    <span class="logo" aria-hidden="true">❋</span>
+    <div class="brand-copy">
+      <span class="brand-kicker">创作工作台</span>
+      <h1>雪花写作法</h1>
+    </div>
+  </div>
   <div class="filewrap">
+    <label class="sr-only" for="file-picker">当前设计文件</label>
     <select id="file-picker" title="切换设计文件"></select>
     <button class="ghost" onclick="newFile()" title="从模板新建">＋ 新建</button>
   </div>
   <span class="spacer"></span>
-  <div class="legend">
-    <span class="d-done"><b>●</b> 完成</span>
-    <span class="d-draft"><b>●</b> 草案</span>
-    <span class="d-todo"><b>●</b> 待办</span>
-  </div>
-  <div id="progress-bar-wrap" title="整体完成进度">
-    <div id="progress-bar"><div id="progress-fill"></div></div>
-    <span id="progress-pct">0%</span>
+  <div class="workspace-summary">
+    <div id="progress-bar-wrap" title="整体完成进度">
+      <span class="progress-label">整体进度</span>
+      <div id="progress-bar"><div id="progress-fill"></div></div>
+      <span id="progress-pct">0%</span>
+    </div>
+    <div class="legend" aria-label="步骤状态说明">
+      <span class="d-done"><b>●</b> 完成</span>
+      <span class="d-draft"><b>●</b> 草案</span>
+      <span class="d-todo"><b>●</b> 待办</span>
+    </div>
   </div>
   <div class="icon-group">
-    <button class="ghost ibtn" onclick="toggleSearch()" title="全文搜索 (Ctrl+F)">🔍</button>
-    <button class="ghost ibtn" onclick="exportFull()" title="导出全文 Markdown">📥</button>
-    <button class="ibtn" id="theme-toggle" onclick="toggleTheme()" title="切换主题">🌓</button>
-    <button class="ibtn lock-btn" id="lock-btn" onclick="doLock()" title="锁屏">🔒</button>
+    <button class="ghost ibtn" onclick="toggleSearch()" title="全文搜索 (Ctrl+F)" aria-label="全文搜索">🔍</button>
+    <button class="ghost ibtn" onclick="exportFull()" title="导出全文 Markdown" aria-label="导出全文 Markdown">⇩</button>
+    <button class="ibtn" id="theme-toggle" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">🌓</button>
+    <button class="ibtn lock-btn" id="lock-btn" onclick="doLock()" title="锁屏" aria-label="锁屏">🔒</button>
   </div>
-  <span id="saved-tag">加载中…</span>
+  <span id="saved-tag" aria-live="polite">加载中…</span>
 </header>
 <div id="search-panel">
   <div class="search-inner">
-    <input type="text" id="search-input" placeholder="搜索关键词…" onkeydown="onSearchKey(event)">
+    <input type="text" id="search-input" placeholder="搜索当前作品…" onkeydown="onSearchKey(event)">
     <button onclick="doSearch()">搜索</button>
     <button class="ghost" onclick="toggleSearch()">关闭</button>
   </div>
@@ -61,15 +70,15 @@
   <div id="sidebar-backdrop"></div>
   <aside id="sidebar"></aside>
   <main>
-    <div class="timeline" id="timeline"></div>
+    <div class="timeline" id="timeline" aria-label="雪花写作步骤"></div>
     <div class="content" id="content"></div>
   </main>
 </div>
 <div id="ext-banner"><span class="b">●</span> 笔记文件已被外部更新 <button class="primary" onclick="reloadDoc(true)">刷新</button></div>
-<div id="global-stats"></div>
-<div class="toast" id="toast">已保存</div>
+<div id="global-stats" aria-live="polite"></div>
+<div class="toast" id="toast" role="status">已保存</div>
 </div>
 
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>
