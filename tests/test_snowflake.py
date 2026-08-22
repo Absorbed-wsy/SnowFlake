@@ -118,6 +118,38 @@ class TestDatabaseSchema(DatabaseTestCase):
         self.create("甲")
         self.assertEqual([item["name"] for item in sf.list_projects()], ["乙", "甲"])
 
+    def test_delete_project_requires_exact_confirmation_name(self):
+        self.create("待删除作品")
+        with self.assertRaisesRegex(ValueError, "作品名不匹配"):
+            sf.delete_project("待删除作品", "待删除作品 ")
+        self.assertEqual(sf.load_project("待删除作品")["name"], "待删除作品")
+
+    def test_delete_project_cascades_project_content_only(self):
+        self.create("保留作品")
+        self.create("待删除作品")
+        sf.save_section("待删除作品", "step7", sf.EMPTY_DOCUMENT, None, [
+            {"title": "待删除人物", "document": document({"type": "paragraph", "html": "内容"})}
+        ])
+        flow = sf.default_flow()
+        flow["nodes"] = [{
+            "id": "delete-node", "lane": "main", "title": "待删除节点", "summary": "", "details": "",
+            "type": "event", "status": "idea", "volume": "", "color": "neutral", "linked_section": "",
+            "tags": [], "x": 100, "y": 100, "width": 220,
+        }]
+        sf.save_flow("待删除作品", flow)
+
+        self.assertEqual(sf.delete_project("待删除作品", "待删除作品"), "待删除作品")
+        self.assertEqual([item["name"] for item in sf.list_projects()], ["保留作品"])
+        with self.assertRaisesRegex(ValueError, "作品不存在"):
+            sf.load_project("待删除作品")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM sections WHERE project_id NOT IN "
+                                          "(SELECT id FROM projects)").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM flow_nodes").fetchone()[0], 0)
+        finally:
+            conn.close()
+
     def test_settings_persist(self):
         sf.set_setting("port", 12345)
         sf.set_setting("password_hash", sf.hash_password("secret"))

@@ -112,6 +112,9 @@ button.primary{background:var(--accent); color:#fff; border-color:var(--accent);
 button.primary:hover{background:var(--accent2); border-color:var(--accent2); color:#fff}
 button.ghost{background:transparent; border-color:transparent; color:var(--muted)}
 button.ghost:hover{color:var(--accent); border-color:transparent}
+button.ghost.project-delete-trigger{color:var(--faint)}
+button.ghost.project-delete-trigger:hover{color:var(--danger)}
+button.ghost.project-delete-trigger:disabled{opacity:.35;cursor:not-allowed;color:var(--faint)}
 button.danger{background:var(--danger); color:#fff; border-color:var(--danger)}
 button.danger:hover{opacity:.9}
 header .spacer{flex:1}
@@ -575,6 +578,22 @@ aside a .st{font-size:14px}
 .settings-storage-note{display:flex;flex-direction:column;gap:4px;padding:12px 14px;border:1px solid var(--done-bd);border-radius:10px;background:var(--done-bg);color:var(--done);font-size:12px}
 .settings-storage-note span{color:var(--muted)}
 .settings-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 22px 18px;border-top:1px solid var(--border)}
+
+.delete-project-card{width:min(470px,100%);overflow:hidden;border:1px solid color-mix(in srgb,var(--danger) 35%,var(--border));border-radius:17px;background:var(--panel);box-shadow:0 24px 70px rgba(0,0,0,.28)}
+.delete-project-head{display:flex;align-items:center;justify-content:space-between;padding:15px 18px 4px}
+.delete-project-head>span{padding:4px 9px;border-radius:999px;background:var(--danger-bg,#fbe9e7);color:var(--danger);font-size:11.5px;font-weight:700;letter-spacing:.04em}
+.delete-project-body{padding:8px 28px 24px;text-align:center}
+.delete-project-icon{display:grid;place-items:center;width:46px;height:46px;margin:4px auto 13px;border:1px solid color-mix(in srgb,var(--danger) 40%,transparent);border-radius:50%;background:color-mix(in srgb,var(--danger) 12%,transparent);color:var(--danger);font-size:24px;font-weight:750}
+.delete-project-body h2{margin:0 0 9px;font-size:20px}
+.delete-project-body>p{min-height:44px;margin:0 auto 15px;color:var(--muted);font-size:13.5px;line-height:1.65}
+.delete-project-name{padding:10px 12px;border:1px solid var(--border2);border-radius:9px;background:var(--panel2);color:var(--text);font-size:13px;font-weight:700;overflow-wrap:anywhere}
+.delete-project-confirm-field{display:none;flex-direction:column;gap:7px;margin-top:16px;text-align:left;color:var(--muted);font-size:12.5px;font-weight:600}
+.delete-project-confirm-field.show{display:flex}
+.delete-project-confirm-field input{width:100%;padding:10px 11px;border:1px solid var(--border2);border-radius:9px;background:var(--panel2);color:var(--text);outline:none}
+.delete-project-confirm-field input:focus{border-color:var(--danger);box-shadow:0 0 0 3px color-mix(in srgb,var(--danger) 15%,transparent)}
+.delete-project-confirm-field small{color:var(--faint);font-size:11.5px;font-weight:400}.delete-project-confirm-field small.matched{color:var(--done)}
+.delete-project-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px 18px;border-top:1px solid var(--border)}
+.delete-project-actions button:disabled{opacity:.42;cursor:not-allowed}
 
 .item-card,.chapter-card{border-radius:12px}.item-card{padding:18px 20px}.item-card:hover,.chapter-card:hover{border-color:var(--accent); box-shadow:0 6px 18px rgba(20,30,50,.06)}
 .item-edit-card{border-radius:12px}

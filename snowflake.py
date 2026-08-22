@@ -563,6 +563,16 @@ def create_project(name):
     return key
 
 
+def delete_project(name, confirmation_name):
+    with WRITE_LOCK, _db_connect() as conn:
+        project = _project_row(name, conn)
+        if str(confirmation_name or "") != project["name"]:
+            raise ValueError("输入的作品名不匹配，未执行删除")
+        deleted_name = project["name"]
+        conn.execute("DELETE FROM projects WHERE id=?", (project["id"],))
+    return deleted_name
+
+
 def list_projects():
     with _db_connect() as conn:
         rows = conn.execute("SELECT name,updated_at FROM projects ORDER BY name COLLATE NOCASE").fetchall()
@@ -1007,6 +1017,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/project/create":
                 name = create_project(data.get("name"))
+                self._json(200, {"ok": True, "name": name, "projects": list_projects()})
+            elif route == "/api/project/delete":
+                name = delete_project(data.get("project"), data.get("confirmation_name"))
                 self._json(200, {"ok": True, "name": name, "projects": list_projects()})
             elif route == "/api/project/import-db":
                 names = import_database(data.get("filename"), data.get("data"))

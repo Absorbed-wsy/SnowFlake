@@ -31,6 +31,8 @@ var activeEditor=null;
 var pendingConflict=null;
 var autosaveTimer=null;
 var pollTimer=null;
+var deleteProjectStage=0;
+var deleteProjectTarget="";
 
 function escapeHtml(value){
   return String(value==null?"":value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
@@ -142,8 +144,9 @@ async function loadApp(){
 function populatePicker(projects){
   var picker=document.getElementById("project-picker");
   picker.innerHTML="";
-  if(!projects.length){var empty=document.createElement("option");empty.textContent="尚无作品";empty.value="";picker.appendChild(empty);return;}
-  projects.forEach(function(project){var option=document.createElement("option");option.value=project.name;option.textContent=project.name;picker.appendChild(option);});
+  if(!projects.length){var empty=document.createElement("option");empty.textContent="尚无作品";empty.value="";picker.appendChild(empty);}
+  else projects.forEach(function(project){var option=document.createElement("option");option.value=project.name;option.textContent=project.name;picker.appendChild(option);});
+  document.getElementById("project-delete-btn").disabled=!projects.length;
 }
 
 async function onPickProject(){
@@ -170,6 +173,93 @@ async function newProject(){
     await loadProject();
     toast("已创建："+currentProject);
   }catch(error){toast(error.message,true);}
+}
+
+async function openDeleteProject(){
+  if(!currentProject)return;
+  if(window.FlowBoard)await window.FlowBoard.flush();
+  if(editMode&&dirty){
+    await save(true);
+    if(dirty){toast("当前修改尚未保存，暂不能删除文稿",true);return;}
+  }
+  deleteProjectTarget=currentProject;
+  deleteProjectStage=1;
+  renderDeleteProjectStep();
+  document.getElementById("delete-project-modal").classList.add("show");
+  document.getElementById("delete-project-next").focus();
+}
+
+function closeDeleteProject(){
+  document.getElementById("delete-project-modal").classList.remove("show");
+  deleteProjectStage=0;
+  deleteProjectTarget="";
+  document.getElementById("delete-project-confirm-name").value="";
+  var button=document.getElementById("delete-project-confirm");
+  button.textContent="永久删除";
+  button.disabled=true;
+}
+
+function renderDeleteProjectStep(){
+  var titles=["","删除当前设计文稿？","请再次确认删除","输入文稿名称完成确认"];
+  var messages=["",
+    "该操作将删除这份文稿中的全部雪花步骤、章节、人物资料和故事走向图。",
+    "删除后无法在工作台内撤销。其他设计文稿和应用设置不会受到影响。",
+    "这是最后一次确认。只有输入与下方完全一致的名称，才能永久删除。"
+  ];
+  document.getElementById("delete-project-step").textContent="确认 "+deleteProjectStage+" / 3";
+  document.getElementById("delete-project-title").textContent=titles[deleteProjectStage];
+  document.getElementById("delete-project-message").textContent=messages[deleteProjectStage];
+  document.getElementById("delete-project-name").textContent=deleteProjectTarget;
+  document.getElementById("delete-project-confirm-wrap").classList.toggle("show",deleteProjectStage===3);
+  document.getElementById("delete-project-next").style.display=deleteProjectStage<3?"":"none";
+  document.getElementById("delete-project-next").textContent=deleteProjectStage===1?"继续确认":"继续，输入名称";
+  document.getElementById("delete-project-confirm").style.display=deleteProjectStage===3?"":"none";
+  if(deleteProjectStage===3){
+    var input=document.getElementById("delete-project-confirm-name");
+    input.value="";
+    updateDeleteConfirmation();
+    setTimeout(function(){input.focus();},0);
+  }
+}
+
+function advanceDeleteProject(){
+  if(deleteProjectStage<1||deleteProjectStage>=3)return;
+  deleteProjectStage+=1;
+  renderDeleteProjectStep();
+}
+
+function updateDeleteConfirmation(){
+  var input=document.getElementById("delete-project-confirm-name");
+  var matches=input.value===deleteProjectTarget;
+  document.getElementById("delete-project-confirm").disabled=!matches;
+  var hint=document.getElementById("delete-project-match-hint");
+  hint.textContent=matches?"名称匹配，可以删除":"名称必须完全一致";
+  hint.classList.toggle("matched",matches);
+}
+
+async function confirmDeleteProject(){
+  if(deleteProjectStage!==3)return;
+  var input=document.getElementById("delete-project-confirm-name");
+  if(input.value!==deleteProjectTarget){updateDeleteConfirmation();return;}
+  var button=document.getElementById("delete-project-confirm");
+  button.disabled=true;button.textContent="正在删除…";
+  try{
+    var response=await postJson("/api/project/delete",{project:deleteProjectTarget,confirmation_name:input.value});
+    var result=await response.json();
+    if(!response.ok)throw new Error(result.error||"删除失败");
+    var deletedName=result.name;
+    closeDeleteProject();
+    if(window.FlowBoard)window.FlowBoard.reset();
+    currentProject="";projectData=null;currentKey="preamble";editMode=false;dirty=false;editingChapter=null;
+    localStorage.removeItem("sf_project");
+    document.getElementById("global-stats").innerHTML="";
+    await loadApp();
+    toast("已删除："+deletedName);
+  }catch(error){
+    button.textContent="永久删除";
+    updateDeleteConfirmation();
+    toast(error.message,true);
+  }
 }
 
 function fileToBase64(file){
@@ -607,10 +697,16 @@ function toast(message,error){var target=document.getElementById("toast");target
 function onKeydown(event){
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="s"){event.preventDefault();if(editMode)save(false);else if(currentKey===FLOW_KEY&&window.FlowBoard)window.FlowBoard.flush();}
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="f"){event.preventDefault();toggleSearch();}
+  if(event.key==="Escape"&&document.getElementById("delete-project-modal").classList.contains("show")){closeDeleteProject();return;}
   if(event.key==="Escape"&&editMode)cancelEdit();
 }
 
 window.newProject=newProject;
+window.openDeleteProject=openDeleteProject;
+window.closeDeleteProject=closeDeleteProject;
+window.advanceDeleteProject=advanceDeleteProject;
+window.updateDeleteConfirmation=updateDeleteConfirmation;
+window.confirmDeleteProject=confirmDeleteProject;
 window.importDatabase=importDatabase;
 window.enterEdit=enterEdit;
 window.cancelEdit=cancelEdit;
