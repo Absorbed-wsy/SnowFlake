@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>❋ 雪花写作法工作台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>❋</text></svg>">
-<link rel="stylesheet" href="style.css?v=6">
+<link rel="stylesheet" href="style.css?v=7">
 <link rel="stylesheet" href="flow.css?v=6">
 </head>
 <body>
@@ -36,6 +36,7 @@
   <div class="project-switcher">
     <label class="sr-only" for="project-picker">当前作品</label>
     <select id="project-picker" title="切换作品"></select>
+    <button class="ghost project-rename-trigger" id="project-rename-btn" onclick="openRenameProject()" title="修改当前设计文稿名称">改名</button>
     <button class="ghost" onclick="newProject()" title="在数据库中新建作品">＋ 新建</button>
     <button class="ghost project-delete-trigger" id="project-delete-btn" onclick="openDeleteProject()" title="删除当前设计文稿">删除</button>
     <button class="ghost" onclick="document.getElementById('project-import').click()" title="导入另一个 SnowFlake 数据库">导入数据库</button>
@@ -96,6 +97,16 @@
   </section>
 </div>
 
+<div class="modal-backdrop" id="rename-project-modal" onclick="if(event.target===this)closeRenameProject()">
+  <section class="settings-card rename-project-card" role="dialog" aria-modal="true" aria-labelledby="rename-project-title">
+    <div class="settings-head"><div><span>当前作品</span><h2 id="rename-project-title">修改作品名称</h2></div><button class="ibtn" onclick="closeRenameProject()" aria-label="取消重命名">×</button></div>
+    <div class="settings-body">
+      <label class="settings-field" for="rename-project-name"><span>新作品名称</span><input id="rename-project-name" type="text" maxlength="160" autocomplete="off" spellcheck="false" oninput="updateRenameProject()" onkeydown="if(event.key==='Enter')confirmRenameProject()"><small id="rename-project-hint">仅修改名称，雪花步骤、人物、章节和走向图都会完整保留。</small></label>
+    </div>
+    <div class="settings-actions"><button class="ghost" onclick="closeRenameProject()">取消</button><button class="primary" id="rename-project-confirm" onclick="confirmRenameProject()">保存新名称</button></div>
+  </section>
+</div>
+
 <div class="modal-backdrop" id="delete-project-modal" onclick="if(event.target===this)closeDeleteProject()">
   <section class="delete-project-card" role="dialog" aria-modal="true" aria-labelledby="delete-project-title">
     <div class="delete-project-head">
@@ -123,6 +134,6 @@
 </div>
 
 <script src="flow.js?v=7"></script>
-<script src="app.js?v=18"></script>
+<script src="app.js?v=19"></script>
 </body>
 </html>

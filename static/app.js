@@ -31,6 +31,7 @@ var activeEditor=null;
 var pendingConflict=null;
 var autosaveTimer=null;
 var pollTimer=null;
+var renameProjectOriginal="";
 var deleteProjectStage=0;
 var deleteProjectTarget="";
 
@@ -146,6 +147,7 @@ function populatePicker(projects){
   picker.innerHTML="";
   if(!projects.length){var empty=document.createElement("option");empty.textContent="尚无作品";empty.value="";picker.appendChild(empty);}
   else projects.forEach(function(project){var option=document.createElement("option");option.value=project.name;option.textContent=project.name;picker.appendChild(option);});
+  document.getElementById("project-rename-btn").disabled=!projects.length;
   document.getElementById("project-delete-btn").disabled=!projects.length;
 }
 
@@ -173,6 +175,64 @@ async function newProject(){
     await loadProject();
     toast("已创建："+currentProject);
   }catch(error){toast(error.message,true);}
+}
+
+async function openRenameProject(){
+  if(!currentProject)return;
+  if(window.FlowBoard)await window.FlowBoard.flush();
+  if(editMode&&dirty){
+    await save(true);
+    if(dirty){toast("当前修改尚未保存，暂不能修改作品名",true);return;}
+  }
+  renameProjectOriginal=currentProject;
+  var input=document.getElementById("rename-project-name");
+  input.value=currentProject;
+  updateRenameProject();
+  document.getElementById("rename-project-modal").classList.add("show");
+  setTimeout(function(){input.focus();input.select();},0);
+}
+
+function closeRenameProject(){
+  document.getElementById("rename-project-modal").classList.remove("show");
+  renameProjectOriginal="";
+  document.getElementById("rename-project-name").value="";
+  var button=document.getElementById("rename-project-confirm");
+  button.textContent="保存新名称";
+  button.disabled=true;
+}
+
+function updateRenameProject(){
+  var value=document.getElementById("rename-project-name").value.trim();
+  var valid=!!value&&value!==renameProjectOriginal;
+  document.getElementById("rename-project-confirm").disabled=!valid;
+  var hint=document.getElementById("rename-project-hint");
+  hint.textContent=value===renameProjectOriginal?"请输入一个不同的新名称。":"仅修改名称，雪花步骤、人物、章节和走向图都会完整保留。";
+}
+
+async function confirmRenameProject(){
+  if(!renameProjectOriginal)return;
+  var input=document.getElementById("rename-project-name");
+  var newName=input.value.trim();
+  if(!newName||newName===renameProjectOriginal){updateRenameProject();return;}
+  var button=document.getElementById("rename-project-confirm");
+  button.disabled=true;button.textContent="正在保存…";
+  try{
+    var response=await postJson("/api/project/rename",{project:renameProjectOriginal,new_name:newName});
+    var result=await response.json();
+    if(!response.ok)throw new Error(result.error||"重命名失败");
+    closeRenameProject();
+    populatePicker(result.projects||[]);
+    currentProject=result.name;
+    document.getElementById("project-picker").value=currentProject;
+    document.getElementById("project-picker").title="切换作品（当前："+currentProject+"）";
+    localStorage.setItem("sf_project",currentProject);
+    await loadProject();
+    toast("已重命名为："+currentProject);
+  }catch(error){
+    button.textContent="保存新名称";
+    updateRenameProject();
+    toast(error.message,true);
+  }
 }
 
 async function openDeleteProject(){
@@ -697,11 +757,16 @@ function toast(message,error){var target=document.getElementById("toast");target
 function onKeydown(event){
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="s"){event.preventDefault();if(editMode)save(false);else if(currentKey===FLOW_KEY&&window.FlowBoard)window.FlowBoard.flush();}
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="f"){event.preventDefault();toggleSearch();}
+  if(event.key==="Escape"&&document.getElementById("rename-project-modal").classList.contains("show")){closeRenameProject();return;}
   if(event.key==="Escape"&&document.getElementById("delete-project-modal").classList.contains("show")){closeDeleteProject();return;}
   if(event.key==="Escape"&&editMode)cancelEdit();
 }
 
 window.newProject=newProject;
+window.openRenameProject=openRenameProject;
+window.closeRenameProject=closeRenameProject;
+window.updateRenameProject=updateRenameProject;
+window.confirmRenameProject=confirmRenameProject;
 window.openDeleteProject=openDeleteProject;
 window.closeDeleteProject=closeDeleteProject;
 window.advanceDeleteProject=advanceDeleteProject;

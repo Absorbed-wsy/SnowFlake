@@ -118,6 +118,31 @@ class TestDatabaseSchema(DatabaseTestCase):
         self.create("甲")
         self.assertEqual([item["name"] for item in sf.list_projects()], ["乙", "甲"])
 
+    def test_renames_project_without_losing_content(self):
+        self.create("旧书名")
+        sf.save_section("旧书名", "step0", document({"type": "paragraph", "html": "核心设定"}))
+        flow = sf.default_flow()
+        flow["nodes"] = [{
+            "id": "rename-node", "lane": "main", "title": "保留节点", "summary": "", "details": "",
+            "type": "event", "status": "idea", "volume": "", "color": "neutral", "linked_section": "",
+            "tags": [], "x": 100, "y": 100, "width": 220,
+        }]
+        sf.save_flow("旧书名", flow)
+
+        self.assertEqual(sf.rename_project("旧书名", "新书名"), "新书名")
+        with self.assertRaisesRegex(ValueError, "作品不存在"):
+            sf.load_project("旧书名")
+        renamed = sf.load_project("新书名")
+        self.assertIn("核心设定", sf.document_text(renamed["sections"]["step0"]["document"]))
+        self.assertEqual(sf.load_flow("新书名")["flow"]["nodes"][0]["title"], "保留节点")
+
+    def test_rename_rejects_existing_project_name(self):
+        self.create("甲")
+        self.create("乙")
+        with self.assertRaisesRegex(ValueError, "已有同名作品"):
+            sf.rename_project("甲", "乙")
+        self.assertEqual([item["name"] for item in sf.list_projects()], ["乙", "甲"])
+
     def test_delete_project_requires_exact_confirmation_name(self):
         self.create("待删除作品")
         with self.assertRaisesRegex(ValueError, "作品名不匹配"):

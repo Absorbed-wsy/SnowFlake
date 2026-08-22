@@ -563,6 +563,24 @@ def create_project(name):
     return key
 
 
+def rename_project(name, new_name):
+    target_name = _project_name(new_name)
+    with WRITE_LOCK, _db_connect() as conn:
+        project = _project_row(name, conn)
+        if target_name == project["name"]:
+            return project["name"]
+        duplicate = conn.execute(
+            "SELECT 1 FROM projects WHERE name=? COLLATE NOCASE AND id<>?",
+            (target_name, project["id"]),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("已有同名作品：%s" % target_name)
+        now = _db_now(project["updated_at"])
+        conn.execute("UPDATE projects SET name=?,updated_at=? WHERE id=?",
+                     (target_name, now, project["id"]))
+    return target_name
+
+
 def delete_project(name, confirmation_name):
     with WRITE_LOCK, _db_connect() as conn:
         project = _project_row(name, conn)
@@ -1017,6 +1035,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/project/create":
                 name = create_project(data.get("name"))
+                self._json(200, {"ok": True, "name": name, "projects": list_projects()})
+            elif route == "/api/project/rename":
+                name = rename_project(data.get("project"), data.get("new_name"))
                 self._json(200, {"ok": True, "name": name, "projects": list_projects()})
             elif route == "/api/project/delete":
                 name = delete_project(data.get("project"), data.get("confirmation_name"))
