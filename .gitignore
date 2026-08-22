@@ -1,13 +1,9 @@
 __pycache__/
 *.pyc
 *.pyo
-*.bak
 *.tmp
+snowflake.db-journal
 .DS_Store
 *.swp
 *~
 .pytest_cache/
-
-# 配置文件（可能含明文密码，禁止提交）
-snowflake.json
-config.json

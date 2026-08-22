@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>❋ 雪花写作法工作台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>❋</text></svg>">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=6">
+<link rel="stylesheet" href="flow.css?v=6">
 </head>
 <body>
 
@@ -25,17 +26,19 @@
 <div id="app-main" style="display:none">
 <header class="app-header">
   <div class="brand">
-    <button id="menu-btn" aria-label="打开步骤导航">☰</button>
+    <button id="menu-btn" aria-label="打开步骤导航" aria-expanded="false">☰</button>
     <span class="logo" aria-hidden="true">❋</span>
     <div class="brand-copy">
-      <span class="brand-kicker">创作工作台</span>
+      <span class="brand-kicker">V2.0 · 创作工作台</span>
       <h1>雪花写作法</h1>
     </div>
   </div>
-  <div class="filewrap">
-    <label class="sr-only" for="file-picker">当前设计文件</label>
-    <select id="file-picker" title="切换设计文件"></select>
-    <button class="ghost" onclick="newFile()" title="从模板新建">＋ 新建</button>
+  <div class="project-switcher">
+    <label class="sr-only" for="project-picker">当前作品</label>
+    <select id="project-picker" title="切换作品"></select>
+    <button class="ghost" onclick="newProject()" title="在数据库中新建作品">＋ 新建</button>
+    <button class="ghost" onclick="document.getElementById('project-import').click()" title="导入另一个 SnowFlake 数据库">导入数据库</button>
+    <input id="project-import" type="file" accept=".db,.sqlite,.sqlite3" hidden onchange="importDatabase(this.files[0]);this.value=''">
   </div>
   <span class="spacer"></span>
   <div class="workspace-summary">
@@ -52,7 +55,7 @@
   </div>
   <div class="icon-group">
     <button class="ghost ibtn" onclick="toggleSearch()" title="全文搜索 (Ctrl+F)" aria-label="全文搜索">🔍</button>
-    <button class="ghost ibtn" onclick="exportFull()" title="导出全文 Markdown" aria-label="导出全文 Markdown">⇩</button>
+    <button class="ibtn" onclick="openSettings()" title="数据库与应用设置" aria-label="数据库与应用设置">⚙</button>
     <button class="ibtn" id="theme-toggle" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">🌓</button>
     <button class="ibtn lock-btn" id="lock-btn" onclick="doLock()" title="锁屏" aria-label="锁屏">🔒</button>
   </div>
@@ -74,11 +77,26 @@
     <div class="content" id="content"></div>
   </main>
 </div>
-<div id="ext-banner"><span class="b">●</span> 笔记文件已被外部更新 <button class="primary" onclick="reloadDoc(true)">刷新</button></div>
+<div id="ext-banner"><span class="b">●</span> 当前作品已在其他页面更新 <button class="primary" onclick="reloadProject()">刷新</button></div>
 <div id="global-stats" aria-live="polite"></div>
 <div class="toast" id="toast" role="status">已保存</div>
+
+<div class="modal-backdrop" id="settings-modal" onclick="if(event.target===this)closeSettings()">
+  <section class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="settings-head"><div><span>本地数据库</span><h2 id="settings-title">应用设置</h2></div><button class="ibtn" onclick="closeSettings()" aria-label="关闭设置">×</button></div>
+    <div class="settings-body">
+      <label class="settings-field"><span>数据库文件</span><input id="settings-db" readonly><small>正文、走向图和设置全部保存在此文件中。</small></label>
+      <label class="settings-field"><span>服务端口</span><input id="settings-port" type="number" min="1024" max="65535"><small>修改端口后需要重启工作台。</small></label>
+      <label class="settings-field"><span>设置新密码</span><input id="settings-password" type="password" maxlength="128" placeholder="留空表示不修改" autocomplete="new-password"></label>
+      <label class="settings-check"><input id="settings-clear-password" type="checkbox"><span>清除当前密码，启动后直接进入</span></label>
+      <div class="settings-storage-note"><strong>统一存储</strong><span>正文、条目、走向图和应用设置全部写入当前 SQLite 数据库。</span></div>
+    </div>
+    <div class="settings-actions"><button class="ghost" onclick="closeSettings()">取消</button><button class="primary" onclick="saveSettings()">保存设置</button></div>
+  </section>
+</div>
 </div>
 
-<script src="app.js?v=8"></script>
+<script src="flow.js?v=7"></script>
+<script src="app.js?v=17"></script>
 </body>
 </html>

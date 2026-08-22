@@ -1,694 +1,996 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import datetime
 import hashlib
 import hmac
+import html
 import json
 import mimetypes
 import os
-import re
 import secrets
-import shutil
 import socket
-import subprocess
+import sqlite3
+import tempfile
 import threading
 import time
 import webbrowser
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
-
-def _find_static_dir():
-    script_dir = Path(__file__).resolve().parent
-    for base in (script_dir, Path(os.getcwd())):
-        candidate = base / "static"
-        if (candidate / "index.html").is_file():
-            return candidate
-    return script_dir / "static"
+from urllib.parse import parse_qs, urlparse
 
 
-STATIC_DIR = _find_static_dir()
-
-NOTES_DIR = os.getcwd()
+APP_DIR = str(Path(__file__).resolve().parent)
+STATIC_DIR = Path(APP_DIR) / "static"
+DB_PATH = None
 PORT = 10000
-PASSWORD = None
-BACKUP_DIR = None
-BACKUP_REMOTE = None
-BACKUP_PASSWORD = None
+PASSWORD_HASH = None
 VERBOSE = False
+APP_VERSION = "2.0.0"
+SCHEMA_VERSION = 2
+DOCUMENT_VERSION = 2
 CSRF_TOKEN = secrets.token_hex(32)
 SESSION_SECRET = secrets.token_hex(32)
 SESSION_COOKIE = "sf_token"
-
 WRITE_LOCK = threading.RLock()
 
-NODES = [
-    ("step0", "0·核心",     "第0步：核心（内核＋基调＋设定）",   2, "第0步", "第0步"),
-    ("step1", "1·一句话",   "第1步：一句话概括",            2, "第1步", "第1步"),
-    ("step2", "2·一段话",   "第2步：一段话概括",            2, "第2步", "第2步"),
-    ("step3", "3·人物",     "第3步：一页纸人物介绍",        2, "第3步", "第3步"),
-    ("step4", "4·一页大纲", "第4步：一页纸大纲",            2, "第4步", "第4步"),
-    ("step5", "5·人物大纲", "第5步：人物大纲",              2, "第5步", "第5步"),
-    ("step6", "6·四页大纲", "第6步：四页大纲",              2, "第6步", "第6步"),
-    ("step7", "7·人物宝典", "第7步：人物宝典",              2, "第7步", "第7步"),
-    ("step8", "8·场景清单", "第8步：场景清单",              2, "第8步", "第8步"),
-    ("step9", "9·场景双模式", "第9步：场景双模式",          2, "第9步", "第9步"),
-    ("step10", "10·写作", "第10步：写作",              2, "第10步", "第10步"),
+FLOW_VERSION = 2
+FLOW_DEFAULT_LANE_HEIGHT = 520
+
+SECTION_DEFS = [
+    ("preamble", "标题与简介", "document"),
+    ("step0", "第0步 · 核心（内核＋基调＋设定）", "document"),
+    ("step1", "第1步 · 一句话概括", "document"),
+    ("step2", "第2步 · 一段话概括（三幕）", "document"),
+    ("step3", "第3步 · 一页纸人物介绍", "document"),
+    ("step4", "第4步 · 一页纸大纲", "document"),
+    ("step5", "第5步 · 人物大纲", "document"),
+    ("step6", "第6步 · 四页大纲", "document"),
+    ("step7", "第7步 · 人物宝典", "items"),
+    ("step8", "第8步 · 场景清单", "items"),
+    ("step9", "第9步 · 场景双模式", "items"),
+    ("step10", "第10步 · 写作", "chapters"),
 ]
-OTHER = []
-INSERT_HEADING = {
-    "step0": "## 第0步 · 核心（内核＋基调＋设定）",
-    "step1": "## 第1步 · 一句话概括",
-    "step2": "## 第2步 · 一段话概括",
-    "step3": "## 第3步 · 一页纸人物介绍",
-    "step4": "## 第4步 · 一页纸大纲",
-    "step5": "## 第5步 · 人物大纲",
-    "step6": "## 第6步 · 四页大纲",
-    "step7": "## 第7步 · 人物宝典",
-    "step8": "## 第8步 · 场景清单",
-    "step9": "## 第9步 · 场景双模式",
-    "step10": "## 第10步 · 写作",
+
+STEP_META = {
+    key: {"key": key, "short": short, "full": title}
+    for (key, title, _kind), short in zip(SECTION_DEFS[1:], [
+        "0·核心", "1·一句话", "2·一段话", "3·人物", "4·一页大纲", "5·人物大纲",
+        "6·四页大纲", "7·人物宝典", "8·场景清单", "9·场景双模式", "10·写作",
+    ])
 }
-SECTION_META = {n[0]: (n[3], n[4]) for n in NODES}
-for _k, _l, _h in OTHER:
-    SECTION_META[_k] = (2, _h[3:].strip())
-SECTION_KEYS = {"preamble"} | {n[0] for n in NODES}
-KEY_TOK = {n[0]: n[5] for n in NODES if n[5]}
 
-TEMPLATE = """# 《[暂名]》创作笔记
-> （一句话简介）
-
-## 雪花写作法进度看板
-- [ ] **第0步：核心（内核＋基调＋设定）**
-- [ ] 第1步：一句话概括
-- [ ] 第2步：一段话概括（三幕）
-- [ ] 第3步：一页纸人物介绍
-- [ ] 第4步：一页纸大纲
-- [ ] 第5步：人物大纲
-- [ ] 第6步：四页大纲
-- [ ] 第7步：人物宝典
-- [ ] 第8步：场景清单
-- [ ] 第9步：场景双模式
-- [ ] 第10步：写作
-"""
+EMPTY_DOCUMENT = {"version": DOCUMENT_VERSION, "blocks": []}
 
 
-def find_config_path(base=None):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [base, script_dir, os.getcwd()]
-    seen = set()
-    for d in candidates:
-        if not d:
-            continue
-        d = os.path.abspath(d)
-        if d in seen:
-            continue
-        seen.add(d)
-        for name in ("snowflake.json", "config.json"):
-            p = os.path.join(d, name)
-            if os.path.isfile(p):
-                return p
-    return None
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
-def _set_nodes(custom):
-    global NODES, SECTION_META, INSERT_HEADING, KEY_TOK, SECTION_KEYS
-    if not custom:
-        return False
-    result = []
-    for n in custom:
-        if isinstance(n, (list, tuple)) and len(n) >= 6:
-            result.append(tuple(n[:6]))
-        elif isinstance(n, dict):
-            result.append((
-                n.get("key", ""),
-                n.get("short", ""),
-                n.get("full", ""),
-                n.get("level", 2),
-                n.get("prefix", ""),
-                n.get("token", ""),
-            ))
-    NODES = result
-    SECTION_META = {n[0]: (n[3], n[4]) for n in NODES}
-    for _k, _l, _h in OTHER:
-        SECTION_META[_k] = (2, _h[3:].strip())
-    SECTION_KEYS = {"preamble"} | {n[0] for n in NODES}
-    KEY_TOK = {n[0]: n[5] for n in NODES if n[5]}
-    INSERT_HEADING.clear()
-    for n in NODES:
-        INSERT_HEADING[n[0]] = "## " + n[4]
-    for _k, _l, _h in OTHER:
-        INSERT_HEADING[_k] = _h
-    return True
+def _db_connect(path=None, readonly=False):
+    target = os.path.abspath(path or DB_PATH or "")
+    if not target:
+        raise RuntimeError("数据库尚未初始化")
+    if readonly:
+        conn = sqlite3.connect("file:%s?mode=ro" % target.replace("\\", "/"), uri=True,
+                               timeout=10, factory=_ClosingConnection)
+    else:
+        conn = sqlite3.connect(target, timeout=10, factory=_ClosingConnection)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
-def load_config(config_path):
-    global NOTES_DIR, PORT, PASSWORD, BACKUP_DIR, BACKUP_REMOTE, BACKUP_PASSWORD
-    if not config_path or not os.path.isfile(config_path):
-        return False
+def _db_now(previous=0):
+    return max(time.time(), float(previous or 0) + 0.001)
+
+
+def _create_schema(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('todo','draft','done')),
+            kind TEXT NOT NULL CHECK(kind IN ('document','items','chapters')),
+            position INTEGER NOT NULL,
+            document_json TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(project_id,key)
+        );
+        CREATE TABLE IF NOT EXISTS section_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            section_id INTEGER NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            document_json TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS flow_viewports (
+            project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            x REAL NOT NULL,
+            y REAL NOT NULL,
+            zoom REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS flow_lanes (
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL,
+            height REAL NOT NULL,
+            position INTEGER NOT NULL,
+            PRIMARY KEY(project_id,id)
+        );
+        CREATE TABLE IF NOT EXISTS flow_nodes (
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            lane_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            details TEXT NOT NULL,
+            type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            volume TEXT NOT NULL,
+            color TEXT NOT NULL,
+            linked_section TEXT NOT NULL,
+            tags_json TEXT NOT NULL,
+            x REAL NOT NULL,
+            y REAL NOT NULL,
+            width REAL NOT NULL,
+            PRIMARY KEY(project_id,id)
+        );
+        CREATE TABLE IF NOT EXISTS flow_edges (
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            label TEXT NOT NULL,
+            color TEXT NOT NULL,
+            PRIMARY KEY(project_id,id)
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sections_project ON sections(project_id,position);
+        CREATE INDEX IF NOT EXISTS idx_items_section ON section_items(section_id,position);
+        CREATE INDEX IF NOT EXISTS idx_flow_lanes_project ON flow_lanes(project_id,position);
+    """)
+
+
+def init_database(path):
+    global DB_PATH
+    DB_PATH = os.path.abspath(path)
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    with _db_connect() as conn:
+        conn.execute("PRAGMA journal_mode=DELETE")
+        _create_schema(conn)
+        row = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+        if row and int(row["value"]) != SCHEMA_VERSION:
+            raise RuntimeError("不支持的数据库版本：%s" % row["value"])
+        conn.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version',?)",
+                     (str(SCHEMA_VERSION),))
+        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('port',?)", (str(PORT),))
+        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('password_hash','')")
+
+
+def get_setting(key, default=""):
+    with _db_connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    with WRITE_LOCK, _db_connect() as conn:
+        conn.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
+def load_runtime_settings():
+    global PORT, PASSWORD_HASH
     try:
-        with open(config_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        print("警告：配置文件解析失败，已使用默认配置：%s" % e)
-        return False
-    if data.get("dir"):
-        NOTES_DIR = os.path.abspath(data["dir"])
-    if data.get("port"):
-        PORT = data["port"]
-    if "password" in data:
-        PASSWORD = data["password"] or None
-    if data.get("backup_dir"):
-        BACKUP_DIR = os.path.abspath(data["backup_dir"])
-    if data.get("backup_remote"):
-        BACKUP_REMOTE = data["backup_remote"]
-    if data.get("backup_password"):
-        BACKUP_PASSWORD = data["backup_password"]
-    _set_nodes(data.get("nodes", []))
-    return True
+        PORT = max(1024, min(65535, int(get_setting("port", PORT))))
+    except (TypeError, ValueError):
+        PORT = 10000
+    PASSWORD_HASH = get_setting("password_hash", "") or None
 
 
-def notes_path(name):
-    name = os.path.basename(name or "")
-    if not name.endswith(".md") or name in ("", ".", "..") or name.startswith("."):
-        raise ValueError("无效文件名：%r" % name)
-    return os.path.join(NOTES_DIR, name)
+def hash_password(password):
+    password = str(password or "")
+    if not password:
+        return ""
+    iterations = 200000
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return "pbkdf2_sha256$%d$%s$%s" % (
+        iterations,
+        base64.b64encode(salt).decode("ascii"),
+        base64.b64encode(digest).decode("ascii"),
+    )
 
 
-def list_files():
-    out = []
+def verify_password(password, encoded):
     try:
-        names = os.listdir(NOTES_DIR)
-    except OSError:
-        return out
-    for n in sorted(names):
-        if not n.endswith(".md") or n.upper() in ("CLAUDE.MD", "README.MD") or n.startswith("."):
+        algorithm, iterations, salt, expected = str(encoded or "").split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", str(password or "").encode("utf-8"),
+            base64.b64decode(salt), int(iterations))
+        return hmac.compare_digest(base64.b64encode(digest).decode("ascii"), expected)
+    except (ValueError, TypeError):
+        return False
+
+
+class _InlineSanitizer(HTMLParser):
+    ALLOWED = {"strong", "em", "s", "u", "code", "mark", "br"}
+    ALIASES = {"b": "strong", "i": "em", "del": "s", "strike": "s"}
+    COLORS = {"yellow", "red", "green", "blue", "purple"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.stack = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = self.ALIASES.get(tag.lower(), tag.lower())
+        if tag not in self.ALLOWED:
+            return
+        if tag == "br":
+            self.parts.append("<br>")
+            return
+        if tag == "mark":
+            color = next((value for name, value in attrs if name == "data-color"), "yellow")
+            color = color if color in self.COLORS else "yellow"
+            self.parts.append('<mark data-color="%s">' % color)
+        else:
+            self.parts.append("<%s>" % tag)
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        tag = self.ALIASES.get(tag.lower(), tag.lower())
+        if tag in self.stack:
+            while self.stack:
+                open_tag = self.stack.pop()
+                self.parts.append("</%s>" % open_tag)
+                if open_tag == tag:
+                    break
+
+    def handle_data(self, data):
+        self.parts.append(html.escape(data, quote=False))
+
+    def get_html(self):
+        while self.stack:
+            self.parts.append("</%s>" % self.stack.pop())
+        return "".join(self.parts)
+
+
+def sanitize_inline(value, limit=200000):
+    parser = _InlineSanitizer()
+    parser.feed(str(value or "")[:limit])
+    parser.close()
+    return parser.get_html()
+
+
+def normalize_document(value):
+    if not isinstance(value, dict):
+        raise ValueError("正文必须是结构化文档")
+    raw_blocks = value.get("blocks")
+    if not isinstance(raw_blocks, list):
+        raise ValueError("正文缺少 blocks")
+    blocks = []
+    for raw in raw_blocks[:2000]:
+        if not isinstance(raw, dict):
             continue
-        p = os.path.join(NOTES_DIR, n)
-        if os.path.isfile(p):
+        block_type = str(raw.get("type") or "paragraph")
+        if block_type in ("paragraph", "quote"):
+            blocks.append({"type": block_type, "html": sanitize_inline(raw.get("html"))})
+        elif block_type == "heading":
             try:
-                mt = os.path.getmtime(p)
-            except OSError:
-                mt = 0.0
-            out.append({"name": n, "mtime": mt})
-    return out
+                level = max(1, min(6, int(raw.get("level", 2))))
+            except (TypeError, ValueError):
+                level = 2
+            blocks.append({"type": "heading", "level": level,
+                           "html": sanitize_inline(raw.get("html"))})
+        elif block_type in ("unordered_list", "ordered_list"):
+            items = []
+            for item in raw.get("items", [])[:500] if isinstance(raw.get("items"), list) else []:
+                if isinstance(item, dict):
+                    clean = {"html": sanitize_inline(item.get("html"))}
+                    if "checked" in item:
+                        clean["checked"] = bool(item.get("checked"))
+                    items.append(clean)
+                else:
+                    items.append({"html": sanitize_inline(item)})
+            blocks.append({"type": block_type, "items": items})
+        elif block_type == "table":
+            rows = []
+            raw_rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
+            for raw_row in raw_rows[:200]:
+                if isinstance(raw_row, list):
+                    rows.append([sanitize_inline(cell, 20000) for cell in raw_row[:30]])
+            width = max((len(row) for row in rows), default=0)
+            align = list(raw.get("align") or [])[:width]
+            align = [item if item in ("left", "center", "right", "") else "" for item in align]
+            while len(align) < width:
+                align.append("")
+            blocks.append({"type": "table", "header": bool(raw.get("header")),
+                           "align": align, "rows": rows})
+        elif block_type == "divider":
+            blocks.append({"type": "divider"})
+    result = {"version": DOCUMENT_VERSION, "blocks": blocks}
+    if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 5 * 1024 * 1024:
+        raise ValueError("单个文档不能超过 5MB")
+    return result
 
 
-def read_notes(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
+class _TextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "br":
+            self.parts.append("\n")
 
 
-def file_mtime(path):
+def inline_text(value):
+    parser = _TextExtractor()
+    parser.feed(str(value or ""))
+    return "".join(parser.parts)
+
+
+def document_text(document):
+    lines = []
+    for block in normalize_document(document)["blocks"]:
+        block_type = block["type"]
+        if block_type in ("paragraph", "quote", "heading"):
+            lines.append(inline_text(block.get("html")))
+        elif block_type in ("unordered_list", "ordered_list"):
+            lines.extend(inline_text(item.get("html")) for item in block.get("items", []))
+        elif block_type == "table":
+            lines.extend(" | ".join(inline_text(cell) for cell in row) for row in block.get("rows", []))
+    return "\n".join(line for line in lines if line)
+
+
+def _project_name(name):
+    raw = str(name or "").strip()
+    if not raw or raw in (".", "..") or raw.startswith("."):
+        raise ValueError("请输入有效作品名")
+    if raw != os.path.basename(raw):
+        raise ValueError("作品名不能包含路径")
+    if len(raw) > 160:
+        raise ValueError("作品名过长")
+    return raw
+
+
+def _project_row(name, conn=None):
+    key = _project_name(name)
+    if conn is not None:
+        row = conn.execute("SELECT * FROM projects WHERE name=? COLLATE NOCASE", (key,)).fetchone()
+    else:
+        with _db_connect() as db:
+            row = db.execute("SELECT * FROM projects WHERE name=? COLLATE NOCASE", (key,)).fetchone()
+    if not row:
+        raise ValueError("作品不存在：%s" % key)
+    return row
+
+
+def _unique_project_name(conn, preferred):
+    name = _project_name(preferred)
+    base = name
+    index = 2
+    while conn.execute("SELECT 1 FROM projects WHERE name=? COLLATE NOCASE", (name,)).fetchone():
+        name = "%s (%d)" % (base, index)
+        index += 1
+    return name
+
+
+def default_flow():
+    return {
+        "version": FLOW_VERSION,
+        "viewport": {"x": 0, "y": 0, "zoom": 1},
+        "lanes": [
+            {"id": "main", "name": "故事主线", "color": "green", "height": FLOW_DEFAULT_LANE_HEIGHT},
+            {"id": "mystery", "name": "谜题与伏笔", "color": "purple", "height": FLOW_DEFAULT_LANE_HEIGHT},
+            {"id": "character", "name": "人物成长", "color": "blue", "height": FLOW_DEFAULT_LANE_HEIGHT},
+        ],
+        "nodes": [],
+        "edges": [],
+    }
+
+
+def _flow_text(value, limit):
+    return "" if value is None else str(value)[:limit]
+
+
+def _flow_number(value, default, low, high):
     try:
-        return os.path.getmtime(path)
-    except OSError:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def normalize_flow(data):
+    if not isinstance(data, dict):
+        raise ValueError("走向图数据必须是对象")
+    allowed_colors = {"neutral", "green", "purple", "blue", "yellow", "red"}
+    allowed_types = {"event", "clue", "turn", "crisis", "climax", "foreshadow", "payoff"}
+    allowed_statuses = {"idea", "draft", "fixed"}
+    allowed_edge_types = {"advance", "cause", "foreshadow", "conflict", "branch", "merge"}
+    raw_view = data.get("viewport") if isinstance(data.get("viewport"), dict) else {}
+    result = {
+        "version": FLOW_VERSION,
+        "viewport": {
+            "x": _flow_number(raw_view.get("x"), 0, 0, 10000),
+            "y": _flow_number(raw_view.get("y"), 0, 0, 10000),
+            "zoom": _flow_number(raw_view.get("zoom"), 1, 0.2, 2.5),
+        },
+        "lanes": [], "nodes": [], "edges": [],
+    }
+    lane_ids = set()
+    raw_lanes = data.get("lanes") if isinstance(data.get("lanes"), list) else []
+    for raw in raw_lanes[:32]:
+        if not isinstance(raw, dict):
+            continue
+        lane_id = _flow_text(raw.get("id"), 64).strip()
+        if not lane_id or lane_id in lane_ids:
+            continue
+        lane_ids.add(lane_id)
+        color = _flow_text(raw.get("color"), 16)
+        result["lanes"].append({
+            "id": lane_id,
+            "name": _flow_text(raw.get("name"), 80).strip() or "未命名剧情线",
+            "color": color if color in allowed_colors else "neutral",
+            "height": _flow_number(raw.get("height"), FLOW_DEFAULT_LANE_HEIGHT, 280, 1200),
+        })
+    if not result["lanes"]:
+        result["lanes"] = default_flow()["lanes"]
+        lane_ids = {lane["id"] for lane in result["lanes"]}
+    fallback_lane = result["lanes"][0]["id"]
+    node_ids = set()
+    raw_nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+    for raw in raw_nodes[:1000]:
+        if not isinstance(raw, dict):
+            continue
+        node_id = _flow_text(raw.get("id"), 80).strip()
+        if not node_id or node_id in node_ids:
+            continue
+        node_ids.add(node_id)
+        lane = _flow_text(raw.get("lane"), 64)
+        color = _flow_text(raw.get("color"), 16)
+        node_type = _flow_text(raw.get("type"), 24)
+        status = _flow_text(raw.get("status"), 16)
+        tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
+        result["nodes"].append({
+            "id": node_id,
+            "title": _flow_text(raw.get("title"), 160).strip() or "未命名节点",
+            "summary": _flow_text(raw.get("summary"), 1000),
+            "details": _flow_text(raw.get("details"), 20000),
+            "type": node_type if node_type in allowed_types else "event",
+            "status": status if status in allowed_statuses else "idea",
+            "lane": lane if lane in lane_ids else fallback_lane,
+            "volume": _flow_text(raw.get("volume"), 100),
+            "color": color if color in allowed_colors else "neutral",
+            "linked_section": _flow_text(raw.get("linked_section"), 40),
+            "tags": [_flow_text(tag, 40) for tag in tags[:20] if _flow_text(tag, 40).strip()],
+            "x": _flow_number(raw.get("x"), 120, 0, 50000),
+            "y": _flow_number(raw.get("y"), 80, 0, 50000),
+            "width": _flow_number(raw.get("width"), 220, 180, 420),
+        })
+    edge_ids = set()
+    raw_edges = data.get("edges") if isinstance(data.get("edges"), list) else []
+    for raw in raw_edges[:2000]:
+        if not isinstance(raw, dict):
+            continue
+        edge_id = _flow_text(raw.get("id"), 80).strip()
+        source = _flow_text(raw.get("from"), 80)
+        target = _flow_text(raw.get("to"), 80)
+        if not edge_id or edge_id in edge_ids or source not in node_ids or target not in node_ids or source == target:
+            continue
+        edge_ids.add(edge_id)
+        edge_type = _flow_text(raw.get("type"), 24)
+        color = _flow_text(raw.get("color"), 16)
+        result["edges"].append({
+            "id": edge_id, "from": source, "to": target,
+            "type": edge_type if edge_type in allowed_edge_types else "advance",
+            "label": _flow_text(raw.get("label"), 160),
+            "color": color if color in allowed_colors else "neutral",
+        })
+    return result
+
+
+def _write_flow(conn, project_id, flow, updated_at):
+    normalized = normalize_flow(flow)
+    conn.execute("DELETE FROM flow_edges WHERE project_id=?", (project_id,))
+    conn.execute("DELETE FROM flow_nodes WHERE project_id=?", (project_id,))
+    conn.execute("DELETE FROM flow_lanes WHERE project_id=?", (project_id,))
+    conn.execute("DELETE FROM flow_viewports WHERE project_id=?", (project_id,))
+    view = normalized["viewport"]
+    conn.execute("INSERT INTO flow_viewports VALUES(?,?,?,?,?)",
+                 (project_id, view["x"], view["y"], view["zoom"], updated_at))
+    for position, lane in enumerate(normalized["lanes"]):
+        conn.execute("INSERT INTO flow_lanes VALUES(?,?,?,?,?,?)",
+                     (project_id, lane["id"], lane["name"], lane["color"], lane["height"], position))
+    for node in normalized["nodes"]:
+        conn.execute("INSERT INTO flow_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            project_id, node["id"], node["lane"], node["title"], node["summary"], node["details"],
+            node["type"], node["status"], node["volume"], node["color"], node["linked_section"],
+            json.dumps(node["tags"], ensure_ascii=False), node["x"], node["y"], node["width"]))
+    for edge in normalized["edges"]:
+        conn.execute("INSERT INTO flow_edges VALUES(?,?,?,?,?,?,?)", (
+            project_id, edge["id"], edge["from"], edge["to"], edge["type"], edge["label"], edge["color"]))
+    return normalized
+
+
+def create_project(name):
+    now = _db_now()
+    with WRITE_LOCK, _db_connect() as conn:
+        key = _unique_project_name(conn, name)
+        cur = conn.execute("INSERT INTO projects(name,created_at,updated_at) VALUES(?,?,?)", (key, now, now))
+        project_id = cur.lastrowid
+        for position, (section_key, title, kind) in enumerate(SECTION_DEFS):
+            conn.execute(
+                "INSERT INTO sections(project_id,key,title,status,kind,position,document_json,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (project_id, section_key, title, "todo", kind, position,
+                 json.dumps(EMPTY_DOCUMENT), now))
+        _write_flow(conn, project_id, default_flow(), now)
+    return key
+
+
+def list_projects():
+    with _db_connect() as conn:
+        rows = conn.execute("SELECT name,updated_at FROM projects ORDER BY name COLLATE NOCASE").fetchall()
+    return [{"name": row["name"], "mtime": float(row["updated_at"])} for row in rows]
+
+
+def _load_document(value):
+    try:
+        return normalize_document(json.loads(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return dict(EMPTY_DOCUMENT)
+
+
+def load_project(name):
+    with _db_connect() as conn:
+        project = _project_row(name, conn)
+        rows = conn.execute("SELECT * FROM sections WHERE project_id=? ORDER BY position", (project["id"],)).fetchall()
+        sections = {}
+        total_chars = 0
+        for row in rows:
+            document = _load_document(row["document_json"])
+            text = document_text(document)
+            items = []
+            item_rows = conn.execute("SELECT * FROM section_items WHERE section_id=? ORDER BY position,id",
+                                     (row["id"],)).fetchall()
+            for item in item_rows:
+                item_document = _load_document(item["document_json"])
+                item_text = document_text(item_document)
+                total_chars += len(item["title"]) + len(item_text)
+                items.append({"id": item["id"], "title": item["title"],
+                              "document": item_document, "updated_at": float(item["updated_at"])})
+            total_chars += len(text)
+            sections[row["key"]] = {
+                "key": row["key"], "title": row["title"], "status": row["status"],
+                "kind": row["kind"], "document": document, "items": items,
+                "updated_at": float(row["updated_at"]), "chars": len(text),
+            }
+    nodes = []
+    for key, meta in STEP_META.items():
+        section = sections.get(key, {})
+        nodes.append({"key": key, "short": meta["short"], "full": meta["full"],
+                      "status": section.get("status", "todo")})
+    done = sum(1 for node in nodes if node["status"] == "done")
+    draft = sum(1 for node in nodes if node["status"] == "draft")
+    mtime = float(project["updated_at"])
+    return {
+        "name": project["name"], "mtime": mtime,
+        "saved_at": datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "sections": sections, "nodes": nodes,
+        "stats": {"total_chars": total_chars,
+                  "progress": {"done": done, "draft": draft, "total": len(nodes),
+                               "percent": round(done / len(nodes) * 100) if nodes else 0}},
+    }
+
+
+def project_mtime(name):
+    try:
+        return float(_project_row(name)["updated_at"])
+    except ValueError:
         return 0.0
 
 
-def heading_level(line):
-    m = re.match(r"^(#{1,6})\s", line)
-    return len(m.group(1)) if m else 0
-
-
-def find_block(lines, level, prefix):
-    hashes = "#" * level
-    for i, l in enumerate(lines):
-        if l.startswith(hashes + " ") and not l.startswith(hashes + "#"):
-            if l[level + 1:].lstrip().startswith(prefix):
-                end = len(lines)
-                for j in range(i + 1, len(lines)):
-                    hl = heading_level(lines[j])
-                    if 0 < hl <= level:
-                        end = j
-                        break
-                return l, i + 1, end
-    return None
-
-
-def first_h2_index(lines):
-    for i, l in enumerate(lines):
-        if heading_level(l) == 2:
-            return i
-    return len(lines)
-
-
-def parse_progress(lines):
-    out = {}
-    blk = find_block(lines, 2, "雪花写作法进度看板")
-    if not blk:
-        return out
-    _, s, e = blk
-    for j in range(s, e):
-        m = re.match(r"\s*-\s*\[([ xX~])\]\s*(.*)", lines[j])
-        if not m:
-            continue
-        mark = m.group(1)
-        st = "done" if mark in ("x", "X") else ("draft" if mark == "~" else "todo")
-        text = m.group(2)
-        for n in NODES:
-            tok = n[5]
-            if tok and tok in text:
-                out[tok] = st
-    return out
-
-
-def node_status(node, prog):
-    return prog.get(node[5], "todo")
-
-
-def build_doc(path):
-    md = read_notes(path)
-    lines = md.split("\n")
-    h2 = first_h2_index(lines)
-    preamble = "\n".join(lines[:h2])
-    prog = parse_progress(lines)
-    sections = {}
-
-    sections["preamble"] = {"title": "标题与简介",
-                            "exists": bool(preamble.strip()),
-                            "body": preamble.strip()}
-    for key, label, head in OTHER:
-        blk = find_block(lines, 2, head[3:].strip())
-        if blk:
-            sections[key] = {"title": blk[0].lstrip("#").strip(), "exists": True,
-                              "body": "\n".join(lines[blk[1]:blk[2]]).strip()}
-        else:
-            sections[key] = {"title": label, "exists": False, "body": ""}
-    for key, _short, full, level, prefix, _tok in NODES:
-        blk = find_block(lines, level, prefix)
-        if blk:
-            sections[key] = {"title": blk[0].lstrip("#").strip(), "exists": True,
-                              "body": "\n".join(lines[blk[1]:blk[2]]).strip()}
-        else:
-            sections[key] = {"title": full, "exists": False, "body": ""}
-
-    nodes = [{"key": n[0], "short": n[1], "full": n[2],
-              "status": node_status(n, prog)} for n in NODES]
-
-    total_chars = 0
-    total_words_zh = 0
-    total_words_en = 0
-    section_counts = {}
-    for k, sec in sections.items():
-        text = (sec.get("body") or "").strip()
-        zh = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
-        en_words = len(re.findall(r'[a-zA-Z]+', text))
-        chars = len(text)
-        section_counts[k] = {"chars": chars, "zh_chars": zh, "en_words": en_words}
-        total_chars += chars
-        total_words_zh += zh
-        total_words_en += en_words
-
-    done_count = sum(1 for n in nodes if n["status"] == "done")
-    draft_count = sum(1 for n in nodes if n["status"] == "draft")
-    total_steps = len(nodes)
-    progress_pct = round(done_count / total_steps * 100) if total_steps else 0
-
-    return {"sections": sections, "nodes": nodes,
-            "mtime": file_mtime(path),
-            "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "stats": {"total_chars": total_chars, "total_words_zh": total_words_zh,
-                      "total_words_en": total_words_en, "section_counts": section_counts,
-                      "progress": {"done": done_count, "draft": draft_count,
-                                   "total": total_steps, "percent": progress_pct}}}
-
-
-def replace_preamble(md, new_preamble):
-    lines = md.split("\n")
-    h2 = first_h2_index(lines)
-    if h2 >= len(lines):
-        return new_preamble.rstrip("\n") + "\n"
-    rest = "\n".join(lines[h2:])
-    return new_preamble.rstrip("\n") + "\n\n" + rest
-
-
-def replace_block(md, level, prefix, new_body):
-    lines = md.split("\n")
-    blk = find_block(lines, level, prefix)
-    if not blk:
-        return None
-    _, s, e = blk
-    body = new_body.rstrip("\n")
-    new_lines = lines[:s] + (body.split("\n") if body else []) + lines[e:]
-    return "\n".join(new_lines) + "\n"
-
-
-def insert_block(md, key, body):
-    lines = md.split("\n")
-    heading = INSERT_HEADING[key]
-    body = body.rstrip("\n")
-    block = [heading] + (body.split("\n") if body else [])
-    pos = None
-
-    if key.startswith("step"):
-        num = int(key[4:])
-        for i, l in enumerate(lines):
-            hm = re.match(r"^## 第(\d+)步", l)
-            if hm and int(hm.group(1)) > num:
-                pos = i
-                break
-    if pos is None:
-        out = lines[:]
-        while out and out[-1].strip() == "":
-            out.pop()
-        out.append("")
-        out += block
-    else:
-        out = lines[:pos] + [""] + block + [""] + lines[pos:]
-    return "\n".join(out) + "\n"
-
-
-def set_status(md, tok, status):
-    mark = {"done": "x", "draft": "~", "todo": " "}[status]
-    lines = md.split("\n")
-    blk = find_block(lines, 2, "雪花写作法进度看板")
-    if not blk:
-        return md
-    _, s, e = blk
-    for j in range(s, e):
-        if re.match(r"\s*-\s*\[[ xX~]\]", lines[j]) and tok in lines[j]:
-            lines[j] = re.sub(r"(\s*-\s*\[)[ xX~](\])",
-                              lambda m: m.group(1) + mark + m.group(2),
-                              lines[j], count=1)
-            break
-    return "\n".join(lines) + "\n"
-
-
-def write_notes(path, md):
-    with WRITE_LOCK:
-        if os.path.exists(path):
-            shutil.copy2(path, path + ".bak")
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(md)
-        os.replace(tmp, path)
-    _do_backup(path)
-
-
-def _build_scp_cmd(path):
-    if BACKUP_PASSWORD:
-        env = dict(os.environ)
-        env["SSHPASS"] = BACKUP_PASSWORD
-        cmd = ["sshpass", "-e", "scp", "-q", "-o", "ConnectTimeout=5",
-               "-o", "StrictHostKeyChecking=accept-new", path, BACKUP_REMOTE]
-    else:
-        env = None
-        cmd = ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-               "-o", "StrictHostKeyChecking=accept-new", path, BACKUP_REMOTE]
-    return cmd, env
-
-
-def _run_remote_backup(path):
-    cmd, env = _build_scp_cmd(path)
-    try:
-        result = subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, timeout=30)
-        if result.returncode != 0:
-            err = result.stderr.decode("utf-8", "replace").strip()
-            print("  [备份] 远程备份失败(退出码 %d): %s" % (result.returncode, err), flush=True)
-    except subprocess.TimeoutExpired:
-        print("  [备份] 远程备份超时(>30s)", flush=True)
-    except Exception as e:
-        print("  [备份] 远程备份失败: %s" % e, flush=True)
-
-
-def _remote_backup_probe():
-    if not BACKUP_REMOTE:
-        return
-    host = BACKUP_REMOTE.rsplit(":", 1)[0]
-    if not host:
-        return
-    if BACKUP_PASSWORD:
-        env = dict(os.environ)
-        env["SSHPASS"] = BACKUP_PASSWORD
-        cmd = ["sshpass", "-e", "ssh", "-o", "ConnectTimeout=5",
-               "-o", "StrictHostKeyChecking=accept-new", host, "true"]
-    else:
-        env = None
-        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-               "-o", "StrictHostKeyChecking=accept-new", host, "true"]
-    try:
-        result = subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, timeout=15)
-        if result.returncode == 0:
-            print("  远程备份: 连通性自检通过", flush=True)
-        else:
-            err = result.stderr.decode("utf-8", "replace").strip()
-            print("  [警告] 远程备份自检失败(退出码 %d): %s" % (result.returncode, err), flush=True)
-            print("  [警告] 保存时仍会尝试备份, 失败仅打印警告", flush=True)
-    except subprocess.TimeoutExpired:
-        print("  [警告] 远程备份自检超时", flush=True)
-    except Exception as e:
-        print("  [警告] 远程备份自检出错: %s" % e, flush=True)
-
-
-def _do_backup(path):
-    if BACKUP_DIR:
-        dest = os.path.join(BACKUP_DIR, os.path.basename(path))
-        if os.path.abspath(dest) != os.path.abspath(path):
-            try:
-                os.makedirs(BACKUP_DIR, exist_ok=True)
-                shutil.copy2(path, dest)
-            except Exception as e:
-                print("  [备份] 本地备份失败: %s" % e, flush=True)
-    if BACKUP_REMOTE:
-        threading.Thread(target=_run_remote_backup, args=(path,), daemon=True).start()
-
-
-def _command_available(cmd):
-    try:
-        subprocess.run([cmd, "-V"], capture_output=True, timeout=5)
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-def handle_save(path, key, body, status, expected_mtime=None):
-    with WRITE_LOCK:
-        current_mtime = file_mtime(path)
-        if expected_mtime is not None and expected_mtime > 0 and current_mtime > expected_mtime + 0.001:
+def save_section(name, key, document=None, status=None, items=None, expected_mtime=None):
+    valid_keys = {item[0] for item in SECTION_DEFS}
+    if key not in valid_keys:
+        raise ValueError("无效栏目：%s" % key)
+    if status is not None and status not in ("todo", "draft", "done"):
+        raise ValueError("无效状态")
+    with WRITE_LOCK, _db_connect() as conn:
+        project = _project_row(name, conn)
+        current_mtime = float(project["updated_at"])
+        if expected_mtime is not None and float(expected_mtime or 0) > 0 \
+                and current_mtime > float(expected_mtime) + 0.001:
             return None, True
-        md = read_notes(path)
-        if body is not None:
-            if key == "preamble":
-                md = replace_preamble(md, body)
-            elif key in SECTION_META:
-                level, prefix = SECTION_META[key]
-                new_md = replace_block(md, level, prefix, body)
-                if new_md is None:
-                    new_md = insert_block(md, key, body)
-                md = new_md
-            else:
-                raise ValueError("bad key: %s" % key)
-        if status is not None and key in KEY_TOK:
-            md = set_status(md, KEY_TOK[key], status)
-        write_notes(path, md)
-        return build_doc(path), False
+        section = conn.execute("SELECT * FROM sections WHERE project_id=? AND key=?",
+                               (project["id"], key)).fetchone()
+        if not section:
+            raise ValueError("栏目不存在：%s" % key)
+        normalized = normalize_document(document) if document is not None else _load_document(section["document_json"])
+        new_status = status if status is not None else section["status"]
+        new_mtime = _db_now(current_mtime)
+        conn.execute("UPDATE sections SET status=?,document_json=?,updated_at=? WHERE id=?",
+                     (new_status, json.dumps(normalized, ensure_ascii=False), new_mtime, section["id"]))
+        if items is not None:
+            if section["kind"] not in ("items", "chapters") or not isinstance(items, list):
+                raise ValueError("该栏目不支持条目")
+            existing_rows = conn.execute(
+                "SELECT id,position FROM section_items WHERE section_id=?", (section["id"],)).fetchall()
+            existing = {row["id"] for row in existing_rows}
+            existing_by_position = {row["position"]: row["id"] for row in existing_rows}
+            retained = set()
+            for position, item in enumerate(items[:2000]):
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "未命名条目").strip()[:200]
+                item_document = normalize_document(item.get("document") or EMPTY_DOCUMENT)
+                try:
+                    item_id = int(item.get("id"))
+                except (TypeError, ValueError):
+                    item_id = None
+                if item_id not in existing:
+                    item_id = existing_by_position.get(position)
+                if item_id in existing and item_id not in retained:
+                    conn.execute(
+                        "UPDATE section_items SET title=?,position=?,document_json=?,updated_at=? "
+                        "WHERE id=? AND section_id=?",
+                        (title, position, json.dumps(item_document, ensure_ascii=False), new_mtime,
+                         item_id, section["id"]))
+                    retained.add(item_id)
+                else:
+                    cur = conn.execute(
+                        "INSERT INTO section_items(section_id,title,position,document_json,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (section["id"], title, position, json.dumps(item_document, ensure_ascii=False),
+                         new_mtime, new_mtime))
+                    retained.add(cur.lastrowid)
+            stale = existing - retained
+            if stale:
+                conn.executemany("DELETE FROM section_items WHERE id=? AND section_id=?",
+                                 [(item_id, section["id"]) for item_id in stale])
+        conn.execute("UPDATE projects SET updated_at=? WHERE id=?", (new_mtime, project["id"]))
+    return load_project(name), False
 
 
-def create_file(name):
-    path = notes_path(name)
-    if os.path.exists(path):
-        raise ValueError("文件已存在：%s" % name)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(TEMPLATE)
-    _do_backup(path)
-    return path
+def load_flow(name):
+    with _db_connect() as conn:
+        project = _project_row(name, conn)
+        view = conn.execute("SELECT * FROM flow_viewports WHERE project_id=?", (project["id"],)).fetchone()
+        if not view:
+            now = _db_now()
+            flow = _write_flow(conn, project["id"], default_flow(), now)
+            return {"flow": flow, "mtime": now,
+                    "saved_at": datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")}
+        lanes = [dict(row) for row in conn.execute(
+            "SELECT id,name,color,height FROM flow_lanes WHERE project_id=? ORDER BY position", (project["id"],))]
+        nodes = []
+        for row in conn.execute("SELECT * FROM flow_nodes WHERE project_id=?", (project["id"],)):
+            nodes.append({"id": row["id"], "title": row["title"], "summary": row["summary"],
+                          "details": row["details"], "type": row["type"], "status": row["status"],
+                          "lane": row["lane_id"], "volume": row["volume"], "color": row["color"],
+                          "linked_section": row["linked_section"], "tags": json.loads(row["tags_json"]),
+                          "x": row["x"], "y": row["y"], "width": row["width"]})
+        edges = [{"id": row["id"], "from": row["source_id"], "to": row["target_id"],
+                  "type": row["type"], "label": row["label"], "color": row["color"]}
+                 for row in conn.execute("SELECT * FROM flow_edges WHERE project_id=?", (project["id"],))]
+        flow = normalize_flow({"version": FLOW_VERSION,
+                               "viewport": {"x": view["x"], "y": view["y"], "zoom": view["zoom"]},
+                               "lanes": lanes, "nodes": nodes, "edges": edges})
+        mtime = float(view["updated_at"])
+    return {"flow": flow, "mtime": mtime,
+            "saved_at": datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def save_flow(name, flow, expected_mtime=None):
+    normalized = normalize_flow(flow)
+    with WRITE_LOCK, _db_connect() as conn:
+        project = _project_row(name, conn)
+        row = conn.execute("SELECT updated_at FROM flow_viewports WHERE project_id=?", (project["id"],)).fetchone()
+        current_mtime = float(row["updated_at"]) if row else 0
+        if expected_mtime is not None and float(expected_mtime or 0) > 0 \
+                and current_mtime > float(expected_mtime) + 0.001:
+            return None, True
+        new_mtime = _db_now(current_mtime)
+        _write_flow(conn, project["id"], normalized, new_mtime)
+    return load_flow(name), False
+
+
+def search_project(name, query):
+    needle = str(query or "").strip().lower()
+    if not needle:
+        return {"results": []}
+    project = load_project(name)
+    results = []
+    for key, section in project["sections"].items():
+        sources = [(section["title"], document_text(section["document"]))]
+        sources.extend((item["title"], document_text(item["document"])) for item in section["items"])
+        for title, text in sources:
+            position = text.lower().find(needle)
+            if position < 0 and needle not in title.lower():
+                continue
+            start = max(0, position - 45) if position >= 0 else 0
+            snippet = text[start:start + 130].replace("\n", " ")
+            results.append({"key": key, "title": title, "snippet": snippet})
+            if len(results) >= 100:
+                return {"results": results}
+    return {"results": results}
+
+
+def _external_flow(conn, project_id):
+    view = conn.execute("SELECT * FROM flow_viewports WHERE project_id=?", (project_id,)).fetchone()
+    lanes = [dict(row) for row in conn.execute(
+        "SELECT id,name,color,height FROM flow_lanes WHERE project_id=? ORDER BY position", (project_id,))]
+    nodes = []
+    for row in conn.execute("SELECT * FROM flow_nodes WHERE project_id=?", (project_id,)):
+        nodes.append({"id": row["id"], "title": row["title"], "summary": row["summary"],
+                      "details": row["details"], "type": row["type"], "status": row["status"],
+                      "lane": row["lane_id"], "volume": row["volume"], "color": row["color"],
+                      "linked_section": row["linked_section"], "tags": json.loads(row["tags_json"]),
+                      "x": row["x"], "y": row["y"], "width": row["width"]})
+    edges = [{"id": row["id"], "from": row["source_id"], "to": row["target_id"],
+              "type": row["type"], "label": row["label"], "color": row["color"]}
+             for row in conn.execute("SELECT * FROM flow_edges WHERE project_id=?", (project_id,))]
+    return normalize_flow({"version": FLOW_VERSION,
+                           "viewport": {"x": view["x"], "y": view["y"], "zoom": view["zoom"]} if view else {},
+                           "lanes": lanes, "nodes": nodes, "edges": edges})
+
+
+def import_database(filename, encoded):
+    if not str(filename or "").lower().endswith((".db", ".sqlite", ".sqlite3")):
+        raise ValueError("请选择 SQLite 数据库文件")
+    try:
+        payload = base64.b64decode(str(encoded or ""), validate=True)
+    except Exception as exc:
+        raise ValueError("数据库文件编码无效") from exc
+    if len(payload) > 100 * 1024 * 1024:
+        raise ValueError("数据库文件不能超过 100MB")
+    if not payload.startswith(b"SQLite format 3\x00"):
+        raise ValueError("文件不是有效的 SQLite 数据库")
+    handle = tempfile.NamedTemporaryFile(prefix="snowflake-import-", suffix=".db", delete=False)
+    temp_path = handle.name
+    try:
+        handle.write(payload)
+        handle.close()
+        imported = []
+        with _db_connect(temp_path, readonly=True) as source:
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise ValueError("导入数据库完整性检查失败")
+            version = source.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+            if not version or int(version["value"]) != SCHEMA_VERSION:
+                raise ValueError("只能导入 SnowFlake 结构化数据库 v%d" % SCHEMA_VERSION)
+            required = {"projects", "sections", "section_items", "flow_viewports", "flow_lanes",
+                        "flow_nodes", "flow_edges"}
+            tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not required.issubset(tables):
+                raise ValueError("数据库缺少 SnowFlake 数据表")
+            with WRITE_LOCK, _db_connect() as target:
+                for source_project in source.execute("SELECT * FROM projects ORDER BY id"):
+                    name = _unique_project_name(target, source_project["name"])
+                    now = _db_now()
+                    cur = target.execute("INSERT INTO projects(name,created_at,updated_at) VALUES(?,?,?)",
+                                         (name, now, now))
+                    project_id = cur.lastrowid
+                    section_ids = {}
+                    source_sections = source.execute(
+                        "SELECT * FROM sections WHERE project_id=? ORDER BY position", (source_project["id"],)).fetchall()
+                    if {section["key"] for section in source_sections} != {item[0] for item in SECTION_DEFS}:
+                        raise ValueError("导入作品缺少完整的雪花设计栏目")
+                    for section in source_sections:
+                        document = normalize_document(json.loads(section["document_json"]))
+                        cur = target.execute(
+                            "INSERT INTO sections(project_id,key,title,status,kind,position,document_json,updated_at) "
+                            "VALUES(?,?,?,?,?,?,?,?)",
+                            (project_id, section["key"], section["title"], section["status"], section["kind"],
+                             section["position"], json.dumps(document, ensure_ascii=False), now))
+                        section_ids[section["id"]] = cur.lastrowid
+                    for old_section_id, new_section_id in section_ids.items():
+                        for item in source.execute(
+                                "SELECT * FROM section_items WHERE section_id=? ORDER BY position,id",
+                                (old_section_id,)):
+                            document = normalize_document(json.loads(item["document_json"]))
+                            target.execute(
+                                "INSERT INTO section_items(section_id,title,position,document_json,created_at,updated_at) "
+                                "VALUES(?,?,?,?,?,?)",
+                                (new_section_id, item["title"], item["position"],
+                                 json.dumps(document, ensure_ascii=False), now, now))
+                    _write_flow(target, project_id, _external_flow(source, source_project["id"]), now)
+                    imported.append(name)
+        return imported
+    except sqlite3.DatabaseError as exc:
+        raise ValueError("无法读取导入数据库：%s" % exc) from exc
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
 
 
 def _make_session_token():
-    ts = str(int(datetime.datetime.now().timestamp()))
-    payload = ts + ":" + secrets.token_hex(16)
-    sig = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    return payload + ":" + sig
+    payload = str(int(time.time())) + ":" + secrets.token_hex(16)
+    signature = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return payload + ":" + signature
 
 
 def _verify_session(headers):
-    cookie_header = headers.get("Cookie", "")
-    for part in cookie_header.split(";"):
+    for part in headers.get("Cookie", "").split(";"):
         part = part.strip()
-        if part.startswith(SESSION_COOKIE + "="):
-            token = part[len(SESSION_COOKIE) + 1:]
-            try:
-                payload, sig = token.rsplit(":", 1)
-                expected_sig = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
-                if hmac.compare_digest(sig, expected_sig):
-                    ts = payload.split(":")[0]
-                    if int(ts) > int(datetime.datetime.now().timestamp()) - 86400:
-                        return True
-            except Exception:
-                pass
+        if not part.startswith(SESSION_COOKIE + "="):
+            continue
+        token = part[len(SESSION_COOKIE) + 1:]
+        try:
+            payload, signature = token.rsplit(":", 1)
+            expected = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+            timestamp = int(payload.split(":", 1)[0])
+            return hmac.compare_digest(signature, expected) and time.time() - timestamp < 86400 * 7
+        except (ValueError, TypeError):
+            return False
     return False
 
 
 def check_auth(headers):
-    if not PASSWORD:
-        return True
-    return _verify_session(headers)
+    return not PASSWORD_HASH or _verify_session(headers)
 
 
 def check_csrf(headers):
-    token = headers.get("X-CSRF-Token", "")
-    if not token or not CSRF_TOKEN:
-        return False
-    return hmac.compare_digest(token, CSRF_TOKEN)
+    return hmac.compare_digest(headers.get("X-CSRF-Token", ""), CSRF_TOKEN)
 
 
 def guess_content_type(path):
-    ct, _ = mimetypes.guess_type(path)
-    return ct or "application/octet-stream"
+    return mimetypes.guess_type(str(path))[0] or "application/octet-stream"
 
 
-def search_notes(path, query):
-    doc = build_doc(path)
-    results = []
-    q_low = query.lower()
-    if not q_low:
-        return {"results": []}
-    for key, sec in doc["sections"].items():
-        body = (sec.get("body") or "").strip()
-        if not body:
-            continue
-        lines = body.split("\n")
-        for i, line in enumerate(lines):
-            if q_low in line.lower():
-                start = max(0, i - 1)
-                end = min(len(lines), i + 2)
-                snippet = "\n".join(lines[start:end])
-                results.append({"key": key, "line": i + 1, "snippet": snippet,
-                                "title": sec.get("title", key)})
-    return {"results": results}
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
 
-
-CLIENT_DISCONNECTED = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body=b"", ctype="text/plain; charset=utf-8"):
-        try:
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            if body and self.command != "HEAD":
-                self.wfile.write(body)
-        except CLIENT_DISCONNECTED:
-            pass
+    server_version = "SnowFlake/" + APP_VERSION
 
-    def _send_file(self, filepath):
-        if not filepath.is_file():
-            self._send(404, b"not found")
-            return
-        ct = guess_content_type(str(filepath))
-        if ct.startswith("text/") or ct == "application/javascript":
-            ct += "; charset=utf-8"
-        with open(filepath, "rb") as f:
-            data = f.read()
+    def _send(self, status, data=b"", content_type="text/plain; charset=utf-8"):
         try:
-            self.send_response(200)
-            self.send_header("Content-Type", ct)
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "no-store" if "json" in content_type else "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(data)
-        except CLIENT_DISCONNECTED:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
-    def _file_arg(self):
-        q = parse_qs(urlparse(self.path).query)
-        name = (q.get("file") or [None])[0]
-        return notes_path(name)
+    def _json(self, status, value):
+        self._send(status, json.dumps(value, ensure_ascii=False).encode("utf-8"),
+                   "application/json; charset=utf-8")
+
+    def _send_file(self, path):
+        with open(path, "rb") as handle:
+            self._send(200, handle.read(), guess_content_type(path))
+
+    def _project_arg(self):
+        query = parse_qs(urlparse(self.path).query)
+        return _project_name((query.get("project") or [None])[0])
 
     def do_GET(self):
-        p = urlparse(self.path).path
-        PUBLIC_PATHS = {"/", "/index.html", "/style.css", "/app.js", "/api/config"}
-        if PASSWORD and p not in PUBLIC_PATHS and not check_auth(self.headers):
-            self._send(401, json.dumps({"error": "未登录"}, ensure_ascii=False).encode("utf-8"),
-                        "application/json; charset=utf-8")
+        route = urlparse(self.path).path
+        public = {"/", "/index.html", "/style.css", "/app.js", "/flow.css", "/flow.js", "/api/config"}
+        if PASSWORD_HASH and route not in public and not check_auth(self.headers):
+            self._json(401, {"error": "未登录"})
             return
         try:
-            if p in ("/", "/index.html"):
+            if route in ("/", "/index.html"):
                 self._send_file(STATIC_DIR / "index.html")
-            elif p == "/style.css":
-                self._send_file(STATIC_DIR / "style.css")
-            elif p == "/app.js":
-                self._send_file(STATIC_DIR / "app.js")
-            elif p == "/api/files":
-                self._send(200, json.dumps({"files": list_files(), "dir": NOTES_DIR},
-                                           ensure_ascii=False).encode("utf-8"),
-                           "application/json; charset=utf-8")
-            elif p == "/api/doc":
-                self._send(200, json.dumps(build_doc(self._file_arg()), ensure_ascii=False).encode("utf-8"),
-                           "application/json; charset=utf-8")
-            elif p == "/api/mtime":
-                self._send(200, json.dumps({"mtime": file_mtime(self._file_arg())}).encode("utf-8"),
-                           "application/json; charset=utf-8")
-            elif p == "/api/raw":
-                self._send(200, read_notes(self._file_arg()).encode("utf-8"),
-                           "text/plain; charset=utf-8")
-            elif p == "/api/config":
-                self._send(200, json.dumps({"csrf_token": CSRF_TOKEN,
-                                            "auth_required": bool(PASSWORD)},
-                                           ensure_ascii=False).encode("utf-8"),
-                           "application/json; charset=utf-8")
-            elif p == "/api/export":
-                self._send(200, read_notes(self._file_arg()).encode("utf-8"),
-                           "text/markdown; charset=utf-8")
-            elif p == "/api/search":
-                path = self._file_arg()
-                q = parse_qs(urlparse(self.path).query)
-                query = (q.get("q") or [""])[0]
-                if not query:
-                    self._send(200, json.dumps({"results": []}, ensure_ascii=False).encode("utf-8"),
-                               "application/json; charset=utf-8")
-                else:
-                    self._send(200, json.dumps(search_notes(path, query),
-                                               ensure_ascii=False).encode("utf-8"),
-                               "application/json; charset=utf-8")
+            elif route in ("/style.css", "/app.js", "/flow.css", "/flow.js"):
+                self._send_file(STATIC_DIR / route.lstrip("/"))
+            elif route == "/api/projects":
+                self._json(200, {"projects": list_projects(), "database": DB_PATH})
+            elif route == "/api/project":
+                self._json(200, load_project(self._project_arg()))
+            elif route == "/api/project/mtime":
+                self._json(200, {"mtime": project_mtime(self._project_arg())})
+            elif route == "/api/flow":
+                self._json(200, load_flow(self._project_arg()))
+            elif route == "/api/flow/mtime":
+                self._json(200, {"mtime": load_flow(self._project_arg())["mtime"]})
+            elif route == "/api/config":
+                self._json(200, {"csrf_token": CSRF_TOKEN, "auth_required": bool(PASSWORD_HASH),
+                                 "storage": "sqlite", "schema_version": SCHEMA_VERSION,
+                                 "app_version": APP_VERSION})
+            elif route == "/api/settings":
+                self._json(200, {"port": PORT, "password_set": bool(PASSWORD_HASH), "database": DB_PATH})
+            elif route == "/api/search":
+                query = parse_qs(urlparse(self.path).query)
+                self._json(200, search_project(self._project_arg(), (query.get("q") or [""])[0]))
             else:
-                fname = STATIC_DIR / p.lstrip("/")
-                if fname.is_file() and str(fname).startswith(str(STATIC_DIR)):
-                    self._send_file(fname)
+                candidate = (STATIC_DIR / route.lstrip("/")).resolve()
+                if candidate.is_file() and os.path.commonpath([str(candidate), str(STATIC_DIR.resolve())]) == str(STATIC_DIR.resolve()):
+                    self._send_file(candidate)
                 else:
                     self._send(404, b"not found")
-        except ValueError as e:
-            self._send(400, json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                        "application/json; charset=utf-8")
-        except Exception as e:
-            print("  [错误] %s: %s" % (self.path, e), flush=True)
-            self._send(500, json.dumps({"error": "服务器内部错误"}, ensure_ascii=False).encode("utf-8"),
-                        "application/json; charset=utf-8")
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+        except Exception as exc:
+            print("  [错误] %s: %s" % (self.path, exc), flush=True)
+            self._json(500, {"error": "服务器内部错误"})
 
     def do_POST(self):
-        p = urlparse(self.path).path
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        global PORT, PASSWORD_HASH
+        route = urlparse(self.path).path
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            self._json(400, {"ok": False, "error": "Content-Length 无效"})
+            return
+        if length < 0:
+            self._json(400, {"ok": False, "error": "Content-Length 无效"})
+            return
+        if length > 150 * 1024 * 1024:
+            self._json(413, {"ok": False, "error": "请求内容过大"})
+            return
         raw = self.rfile.read(length) if length else b""
         try:
             data = json.loads(raw.decode("utf-8")) if raw else {}
-        except Exception:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             data = {}
-        if p == "/api/login":
-            pwd = data.get("password", "")
-            if PASSWORD is not None and hmac.compare_digest(pwd, PASSWORD):
-                token = _make_session_token()
-                body = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
+        if route == "/api/login":
+            password = str(data.get("password") or "")
+            if PASSWORD_HASH is not None and verify_password(password, PASSWORD_HASH):
+                body = json.dumps({"ok": True}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Set-Cookie", SESSION_COOKIE + "=" + token + "; Path=/; SameSite=Lax; HttpOnly")
+                self.send_header("Set-Cookie", SESSION_COOKIE + "=" + _make_session_token()
+                                 + "; Path=/; SameSite=Lax; HttpOnly")
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
             else:
-                self._send(401, json.dumps({"ok": False, "error": "密码错误"}, ensure_ascii=False).encode("utf-8"),
-                            "application/json; charset=utf-8")
+                self._json(401, {"ok": False, "error": "密码错误"})
             return
-        if p == "/api/logout":
-            body = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
+        if route == "/api/logout":
+            body = json.dumps({"ok": True}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Set-Cookie", SESSION_COOKIE + "=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly")
@@ -696,63 +998,59 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if PASSWORD and not check_auth(self.headers):
-            self._send(401, json.dumps({"ok": False, "error": "未登录"}, ensure_ascii=False).encode("utf-8"),
-                        "application/json; charset=utf-8")
+        if PASSWORD_HASH and not check_auth(self.headers):
+            self._json(401, {"ok": False, "error": "未登录"})
             return
         if not check_csrf(self.headers):
-            self._send(403, json.dumps({"ok": False, "error": "CSRF token mismatch"},
-                                        ensure_ascii=False).encode("utf-8"),
-                        "application/json; charset=utf-8")
+            self._json(403, {"ok": False, "error": "CSRF token mismatch"})
             return
         try:
-            if p == "/api/save":
-                path = notes_path(data.get("file"))
-                key = data.get("key")
-                body = data.get("body")
-                status = data.get("status")
-                expected_mtime = data.get("mtime")
-                try:
-                    doc_result, conflict = handle_save(path, key, body, status, expected_mtime)
-                except ValueError as e:
-                    self._send(400, json.dumps({"ok": False, "error": str(e)},
-                                               ensure_ascii=False).encode("utf-8"),
-                                "application/json; charset=utf-8")
-                    return
+            if route == "/api/project/create":
+                name = create_project(data.get("name"))
+                self._json(200, {"ok": True, "name": name, "projects": list_projects()})
+            elif route == "/api/project/import-db":
+                names = import_database(data.get("filename"), data.get("data"))
+                self._json(200, {"ok": True, "names": names, "projects": list_projects()})
+            elif route == "/api/section/save":
+                result, conflict = save_section(data.get("project"), data.get("key"), data.get("document"),
+                                                data.get("status"), data.get("items"), data.get("mtime"))
                 if conflict:
-                    current_doc = build_doc(path)
-                    self.send_response(409)
-                    self.send_header("Content-Type", "application/json; charset=utf-8")
-                    self.send_header("Cache-Control", "no-store")
-                    body_bytes = json.dumps({
-                        "ok": False,
-                        "error": "文件已被外部修改，请刷新后重试",
-                        "current_mtime": current_doc["mtime"],
-                        "nodes": current_doc["nodes"],
-                        "saved_at": current_doc["saved_at"],
-                    }, ensure_ascii=False).encode("utf-8")
-                    self.send_header("Content-Length", str(len(body_bytes)))
-                    self.end_headers()
-                    self.wfile.write(body_bytes)
-                    return
-                self._send(200, json.dumps(
-                    {"ok": True, "nodes": doc_result["nodes"], "mtime": doc_result["mtime"],
-                     "saved_at": doc_result["saved_at"], "stats": doc_result["stats"]}, ensure_ascii=False).encode("utf-8"),
-                    "application/json; charset=utf-8")
-            elif p == "/api/newfile":
-                create_file(data.get("name", ""))
-                self._send(200, json.dumps({"ok": True, "files": list_files()},
-                                           ensure_ascii=False).encode("utf-8"),
-                            "application/json; charset=utf-8")
+                    self._json(409, {"ok": False, "error": "作品已在其他页面更新",
+                                     "current_mtime": project_mtime(data.get("project"))})
+                else:
+                    self._json(200, {"ok": True, "project": result})
+            elif route == "/api/settings":
+                try:
+                    port = int(data.get("port", PORT))
+                except (TypeError, ValueError):
+                    raise ValueError("端口必须是数字")
+                if not 1024 <= port <= 65535:
+                    raise ValueError("端口范围应为 1024～65535")
+                set_setting("port", port)
+                restart_required = port != PORT
+                if "password" in data:
+                    password = str(data.get("password") or "")
+                    if len(password) > 128:
+                        raise ValueError("密码不能超过 128 个字符")
+                    PASSWORD_HASH = hash_password(password) or None
+                    set_setting("password_hash", PASSWORD_HASH or "")
+                self._json(200, {"ok": True, "restart_required": restart_required,
+                                 "auth_required": bool(PASSWORD_HASH)})
+            elif route == "/api/flow/save":
+                result, conflict = save_flow(data.get("project"), data.get("flow"), data.get("mtime"))
+                if conflict:
+                    self._json(409, {"ok": False, "error": "走向图已在其他页面更新",
+                                     "current_mtime": load_flow(data.get("project"))["mtime"]})
+                else:
+                    self._json(200, {"ok": True, "flow": result["flow"], "mtime": result["mtime"],
+                                     "saved_at": result["saved_at"]})
             else:
                 self._send(404, b"not found")
-        except ValueError as e:
-            self._send(400, json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False).encode("utf-8"),
-                        "application/json; charset=utf-8")
-        except Exception as e:
-            print("  [错误] %s: %s" % (self.path, e), flush=True)
-            self._send(500, json.dumps({"ok": False, "error": "服务器内部错误"}, ensure_ascii=False).encode("utf-8"),
-                        "application/json; charset=utf-8")
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": str(exc)})
+        except Exception as exc:
+            print("  [错误] %s: %s" % (self.path, exc), flush=True)
+            self._json(500, {"ok": False, "error": "服务器内部错误"})
 
     def log_message(self, fmt, *args):
         if VERBOSE:
@@ -761,88 +1059,47 @@ class Handler(BaseHTTPRequestHandler):
 
 def lan_ip():
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        sock.close()
         return ip
     except Exception:
         return "127.0.0.1"
 
 
 def main():
-    global NOTES_DIR, PORT, PASSWORD, BACKUP_DIR, BACKUP_REMOTE, VERBOSE
-
-    ap = argparse.ArgumentParser(
-        description="雪花写作法工作台 —— 可视化编辑雪花法设计文件的本地网页工具")
-    ap.add_argument("--config", default=None,
-                    help="配置文件路径；不指定则自动查找当前目录下的 snowflake.json / config.json")
-    ap.add_argument("-v", "--verbose", action="store_true",
-                    help="打印 HTTP 访问日志（默认静默，仅打印错误/备份告警）")
-    args = ap.parse_args()
-
+    global VERBOSE
+    parser = argparse.ArgumentParser(description="雪花写作法本地小说设计工作台")
+    parser.add_argument("--db", default=None, help="SQLite 数据库路径（默认：程序目录/snowflake.db）")
+    parser.add_argument("-v", "--verbose", action="store_true", help="打印 HTTP 访问日志")
+    args = parser.parse_args()
     VERBOSE = args.verbose
-
-    if args.config:
-        config_path = os.path.abspath(args.config)
-        if not os.path.isfile(config_path):
-            ap.error("配置文件不存在：%s" % config_path)
-    else:
-        config_path = find_config_path()
-    load_config(config_path)
-
-    if not os.path.isdir(NOTES_DIR):
-        ap.error("目录不存在：%s" % NOTES_DIR)
-
-    if BACKUP_DIR:
-        try:
-            os.makedirs(BACKUP_DIR, exist_ok=True)
-        except OSError as e:
-            ap.error("备份目录无法创建：%s (%s)" % (BACKUP_DIR, e))
-
-    if BACKUP_REMOTE:
-        if not _command_available("scp"):
-            ap.error("找不到 scp 命令，请确保系统已安装 OpenSSH 客户端")
-        if BACKUP_PASSWORD and not _command_available("sshpass"):
-            ap.error("配置了远端备份密码，但找不到 sshpass 命令；请安装 sshpass，或在配置中改用免密登录")
-        _remote_backup_probe()
-
-    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    database_path = os.path.abspath(args.db) if args.db else os.path.join(APP_DIR, "snowflake.db")
+    init_database(database_path)
+    load_runtime_settings()
+    server = ExclusiveThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     ip = lan_ip()
-
-    auth_info = "  认证: 已启用（密码保护）" if PASSWORD else "  认证: 无（局域网内均可用）"
-    sep = "=" * 56
-    print(sep)
-    print("  \u274b \u96ea\u82b1\u5199\u4f5c\u6cd5\u5de5\u4f5c\u53f0\u5df2\u542f\u52a8")
-    print("  \u672c\u673a:   http://localhost:%d" % PORT)
-    print("  \u5c40\u57df\u7f51: http://%s:%d" % (ip, PORT))
-    print("  \u6587\u4ef6\u76ee\u5f55: %s" % NOTES_DIR)
-    print(auth_info)
-    if VERBOSE:
-        print("  日志: 已开启访问日志（--verbose）")
-    files = [f["name"] for f in list_files()]
-    print("  发现 %d 个设计文件：%s" % (len(files), "、".join(files) or "（无）"))
-    if BACKUP_DIR:
-        print("  本地备份: %s" % BACKUP_DIR)
-    if BACKUP_REMOTE:
-        print("  远程备份: %s" % BACKUP_REMOTE)
-    print("  每次保存自动 .bak 备份；Ctrl-C 退出")
-    print(sep)
-
-    t = threading.Thread(target=lambda: httpd.serve_forever(), daemon=True)
-    t.start()
-
+    print("=" * 56)
+    print("  ❋ 雪花写作法工作台已启动")
+    print("  版本:   V%s" % APP_VERSION)
+    print("  本机:   http://localhost:%d" % PORT)
+    print("  局域网: http://%s:%d" % (ip, PORT))
+    print("  数据库: %s（结构版本 %d）" % (DB_PATH, SCHEMA_VERSION))
+    print("  认证: %s" % ("已启用" if PASSWORD_HASH else "无"))
+    projects = [item["name"] for item in list_projects()]
+    print("  发现 %d 部作品：%s" % (len(projects), "、".join(projects) or "（无）"))
+    print("=" * 56)
     try:
         webbrowser.open("http://localhost:%d" % PORT)
     except Exception:
         pass
-
     try:
-        while True:
-            time.sleep(1)
+        server.serve_forever()
     except KeyboardInterrupt:
-        print("\n\u518d\u89c1\u3002")
-        httpd.shutdown()
+        pass
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
