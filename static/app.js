@@ -34,6 +34,7 @@ var pollTimer=null;
 var renameProjectOriginal="";
 var deleteProjectStage=0;
 var deleteProjectTarget="";
+var serverDisconnected=false;
 
 function escapeHtml(value){
   return String(value==null?"":value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
@@ -43,17 +44,30 @@ function textToHtml(value){return escapeHtml(value).replace(/\n/g,"<br>");}
 
 function clone(value){return JSON.parse(JSON.stringify(value));}
 
+function localFetch(url,options){
+  return fetch(url,options).then(function(response){
+    serverDisconnected=false;
+    return response;
+  }).catch(function(error){
+    serverDisconnected=true;
+    var saved=document.getElementById("saved-tag");
+    if(saved)setSaved("本地服务未连接",true);
+    if(error&&error.name==="TypeError")throw new Error("无法连接本地服务，请重新启动 SnowFlake");
+    throw error;
+  });
+}
+
 function postJson(url,data){
   var headers={"Content-Type":"application/json"};
   if(csrfToken)headers["X-CSRF-Token"]=csrfToken;
-  return fetch(url,{method:"POST",headers:headers,body:JSON.stringify(data)}).then(function(response){
+  return localFetch(url,{method:"POST",headers:headers,body:JSON.stringify(data)}).then(function(response){
     if(response.status===401&&PASSWORD_REQUIRED){showLogin();throw new Error("未登录");}
     return response;
   });
 }
 
 function getJson(url){
-  return fetch(url).then(function(response){
+  return localFetch(url).then(function(response){
     if(response.status===401&&PASSWORD_REQUIRED){showLogin();throw new Error("未登录");}
     return response.json().then(function(data){
       if(!response.ok)throw new Error(data.error||"请求失败");
@@ -729,7 +743,13 @@ function goSearchResult(key){currentKey=key;editMode=false;renderAll();toggleSea
 
 async function poll(){
   if(!currentProject||editMode)return;
-  try{var result=await getJson("/api/project/mtime?project="+encodeURIComponent(currentProject));if(result.mtime>knownMtime+0.001)showBanner();}catch(ignore){}
+  var reconnecting=serverDisconnected;
+  try{
+    var result=await getJson("/api/project/mtime?project="+encodeURIComponent(currentProject));
+    serverDisconnected=false;
+    if(reconnecting){await loadProject();toast("本地服务已恢复");return;}
+    if(result.mtime>knownMtime+0.001)showBanner();
+  }catch(ignore){}
 }
 async function reloadProject(){hideBanner();editMode=false;dirty=false;editRevision=0;savingSection=false;await loadProject();}
 function showBanner(){document.getElementById("ext-banner").classList.add("show");}
