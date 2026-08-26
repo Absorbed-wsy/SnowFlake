@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -27,44 +28,82 @@ class TestDesktopHelpers(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.original_db = sf.DB_PATH
         self.original_port = sf.PORT
+        self.original_password = sf.PASSWORD_HASH
+        self.state_patch = patch.object(desktop, "app_state_dir", return_value=self.root / "app-state")
+        self.exe_patch = patch.object(desktop, "executable_dir", return_value=self.root / "application")
+        self.state_patch.start()
+        self.exe_patch.start()
 
     def tearDown(self):
         sf.DB_PATH = self.original_db
         sf.PORT = self.original_port
+        sf.PASSWORD_HASH = self.original_password
+        self.exe_patch.stop()
+        self.state_patch.stop()
         self.temporary.cleanup()
 
     @staticmethod
     def args(**values):
-        defaults = {"db": None, "portable": False, "empty": False, "debug": False,
-                    "smoke_test": False}
+        defaults = {"db": None, "portable": False, "debug": False, "smoke_test": False}
         defaults.update(values)
         return argparse.Namespace(**defaults)
 
     def test_explicit_database_path_is_used_directly(self):
         database = self.root / "custom" / "novels.db"
-        data_dir, resolved, imported = desktop.resolve_paths(self.args(db=str(database)))
-        self.assertEqual(data_dir, database.parent)
+        runtime_dir, resolved = desktop.resolve_paths(self.args(db=str(database)))
+        self.assertEqual(runtime_dir, self.root / "application")
         self.assertEqual(resolved, database)
-        self.assertIsNone(imported)
         self.assertTrue(database.parent.is_dir())
 
-    def test_first_desktop_run_copies_existing_database(self):
-        legacy_dir = self.root / "legacy"
-        target_dir = self.root / "desktop-data"
-        legacy_dir.mkdir()
-        source = legacy_dir / "snowflake.db"
+    def test_first_run_defaults_to_executable_directory_without_creating_database(self):
+        runtime_dir, database = desktop.resolve_paths(self.args())
+        self.assertEqual(runtime_dir, self.root / "application")
+        self.assertEqual(database, runtime_dir / "snowflake.db")
+        self.assertFalse(database.exists())
+
+    def test_configured_database_directory_is_reused_when_database_is_missing(self):
+        chosen = self.root / "chosen"
+        desktop.save_database_directory(chosen)
+        runtime_dir, database = desktop.resolve_paths(self.args())
+        self.assertEqual(runtime_dir, self.root / "application")
+        self.assertEqual(database, chosen / "snowflake.db")
+        self.assertFalse(database.exists())
+
+    def test_existing_database_in_selected_directory_is_used_without_copying(self):
+        source = self.root / "imported" / "snowflake.db"
         sf.init_database(str(source))
-        sf.create_project("迁移作品")
-        with patch.object(desktop, "executable_dir", return_value=legacy_dir), \
-                patch.object(desktop, "default_data_dir", return_value=target_dir):
-            data_dir, database, imported = desktop.resolve_paths(self.args())
-        self.assertEqual(data_dir, target_dir)
-        self.assertEqual(imported, source)
-        conn = sqlite3.connect(database)
+        sf.create_project("导入作品")
+        result = desktop.switch_database_directory(source.parent)
+        self.assertEqual(Path(result["database"]), source)
+        self.assertTrue(result["exists"])
+        self.assertFalse((self.root / "application" / "snowflake.db").exists())
         try:
-            self.assertEqual(conn.execute("SELECT name FROM projects").fetchone()[0], "迁移作品")
+            conn = sqlite3.connect(source)
+            self.assertEqual(conn.execute("SELECT name FROM projects").fetchone()[0], "导入作品")
         finally:
             conn.close()
+
+    def test_selecting_empty_directory_does_not_create_database(self):
+        selected = self.root / "empty"
+        result = desktop.switch_database_directory(selected)
+        self.assertFalse(result["exists"])
+        self.assertFalse((selected / "snowflake.db").exists())
+        self.assertEqual(json.loads(desktop.database_state_path().read_text(encoding="utf-8"))[
+            "database_directory"], str(selected.resolve()))
+
+    def test_database_is_created_lazily_by_first_project(self):
+        database = self.root / "lazy" / "snowflake.db"
+        sf.configure_database(str(database))
+        self.assertEqual(sf.list_projects(), [])
+        self.assertFalse(database.exists())
+        sf.create_project("首个作品")
+        self.assertTrue(database.is_file())
+        self.assertEqual(sf.list_projects()[0]["name"], "首个作品")
+
+    def test_database_header_validation(self):
+        invalid = self.root / "invalid.db"
+        invalid.write_text("not a database", encoding="utf-8")
+        self.assertFalse(desktop.is_sqlite_database(invalid))
 
     def test_window_state_round_trip_and_bounds(self):
         state_path = self.root / "window.json"

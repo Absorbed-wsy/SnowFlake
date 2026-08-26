@@ -232,6 +232,18 @@ class TestSectionStorage(DatabaseTestCase):
         self.assertEqual(result["sections"]["step0"]["status"], "done")
         self.assertNotIn("content", result)
 
+    def test_saves_and_loads_ordered_and_unordered_lists(self):
+        value = document(
+            {"type": "unordered_list", "items": [{"html": "项目甲"}, {"html": "项目乙"}]},
+            {"type": "ordered_list", "items": [{"html": "第一步"}, {"html": "第二步"}]},
+        )
+        result, conflict = sf.save_section("测试作品", "step0", value, "draft", None, 0)
+        self.assertFalse(conflict)
+        blocks = result["sections"]["step0"]["document"]["blocks"]
+        self.assertEqual([block["type"] for block in blocks], ["unordered_list", "ordered_list"])
+        self.assertEqual([item["html"] for item in blocks[0]["items"]], ["项目甲", "项目乙"])
+        self.assertEqual([item["html"] for item in blocks[1]["items"]], ["第一步", "第二步"])
+
     def test_saves_items_as_independent_records(self):
         items = [
             {"title": "陆衍", "document": document({"type": "paragraph", "html": "主角"})},

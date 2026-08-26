@@ -661,7 +661,11 @@ function cleanInlineHtml(source){
 function editorToDocument(editor){
   if(!editor)return clone(EMPTY_DOCUMENT);
   var blocks=[];
-  Array.prototype.forEach.call(editor.childNodes,function(node){
+  var blockTags={address:true,article:true,aside:true,blockquote:true,div:true,dl:true,fieldset:true,figure:true,footer:true,form:true,h1:true,h2:true,h3:true,h4:true,h5:true,h6:true,header:true,hr:true,main:true,nav:true,ol:true,p:true,pre:true,section:true,table:true,ul:true};
+  function containsBlockChildren(node){
+    return Array.prototype.some.call(node.childNodes,function(child){return child.nodeType===Node.ELEMENT_NODE&&!!blockTags[child.tagName.toLowerCase()];});
+  }
+  function appendNode(node){
     if(node.nodeType===Node.TEXT_NODE){if(node.nodeValue.trim())blocks.push({type:"paragraph",html:escapeHtml(node.nodeValue)});return;}
     if(node.nodeType!==Node.ELEMENT_NODE)return;
     var tag=node.tagName.toLowerCase();
@@ -675,8 +679,10 @@ function editorToDocument(editor){
       node.querySelectorAll("tr").forEach(function(row){rows.push(Array.prototype.map.call(row.querySelectorAll(":scope > th,:scope > td"),function(cell){return cleanInlineHtml(cell.innerHTML);}));});
       blocks.push({type:"table",header:hasHeader,align:[],rows:rows});
     }else if(tag==="hr"){blocks.push({type:"divider"});}
+    else if(containsBlockChildren(node)){Array.prototype.forEach.call(node.childNodes,appendNode);}
     else{blocks.push({type:"paragraph",html:cleanInlineHtml(node.innerHTML)});}
-  });
+  }
+  Array.prototype.forEach.call(editor.childNodes,appendNode);
   return {version:DOCUMENT_VERSION,blocks:blocks};
 }
 
@@ -758,9 +764,24 @@ function showBanner(){document.getElementById("ext-banner").classList.add("show"
 function hideBanner(){document.getElementById("ext-banner").classList.remove("show");}
 
 async function openSettings(){
-  try{var settings=await getJson("/api/settings");DESKTOP_MODE=!!settings.desktop;document.getElementById("settings-db").value=settings.database||"";document.getElementById("settings-port").value=settings.port;document.getElementById("settings-port-field").style.display=DESKTOP_MODE?"none":"";document.getElementById("settings-open-folder").style.display=DESKTOP_MODE?"":"none";document.getElementById("settings-password").value="";document.getElementById("settings-password").placeholder=settings.password_set?"已设置；留空表示不修改":"留空表示不启用密码";document.getElementById("settings-clear-password").checked=false;document.getElementById("settings-modal").classList.add("show");}catch(error){toast(error.message,true);}
+  try{var settings=await getJson("/api/settings");DESKTOP_MODE=!!settings.desktop;document.getElementById("settings-db-directory").value=settings.database_directory||"";document.getElementById("settings-db").value=settings.database||"";document.getElementById("settings-db-note").textContent=settings.database_exists?"已检测到 snowflake.db，当前作品将直接从该文件读取。":"尚无 snowflake.db，将在首次新建作品时自动创建。";document.getElementById("settings-port").value=settings.port;document.getElementById("settings-port-field").style.display=DESKTOP_MODE?"none":"";document.getElementById("settings-open-folder").style.display=DESKTOP_MODE?"":"none";document.getElementById("settings-choose-directory").style.display=DESKTOP_MODE?"":"none";document.getElementById("settings-password").value="";document.getElementById("settings-password").placeholder=settings.password_set?"已设置；留空表示不修改":"留空表示不启用密码";document.getElementById("settings-clear-password").checked=false;document.getElementById("settings-modal").classList.add("show");}catch(error){toast(error.message,true);}
 }
 function closeSettings(){document.getElementById("settings-modal").classList.remove("show");}
+async function chooseDatabaseDirectory(){
+  try{
+    if(!window.pywebview||!window.pywebview.api)throw new Error("仅桌面版支持选择数据库目录");
+    if(!(await flushAll()))throw new Error("当前修改尚未保存，不能切换数据库");
+    var result=await window.pywebview.api.choose_database_directory();
+    if(!result)return;
+    currentProject="";projectData=null;currentKey="preamble";editMode=false;dirty=false;editingChapter=null;
+    if(window.FlowBoard)window.FlowBoard.reset();
+    await loadApp();
+    document.getElementById("settings-db-directory").value=result.directory||"";
+    document.getElementById("settings-db").value=result.database||"";
+    document.getElementById("settings-db-note").textContent=result.exists?"已检测到 snowflake.db，当前作品将直接从该文件读取。":"尚无 snowflake.db，将在首次新建作品时自动创建。";
+    toast(result.exists?"已切换并直接使用该目录中的数据库":"数据库目录已设置，将在首次新建作品时创建");
+  }catch(error){toast(error.message||"无法切换数据库目录",true);}
+}
 async function saveSettings(){
   var payload={};if(!DESKTOP_MODE)payload.port=Number(document.getElementById("settings-port").value);var password=document.getElementById("settings-password").value;var clear=document.getElementById("settings-clear-password").checked;if(clear)payload.password="";else if(password)payload.password=password;
   try{var response=await postJson("/api/settings",payload);var result=await response.json();if(!response.ok)throw new Error(result.error||"保存失败");PASSWORD_REQUIRED=!!result.auth_required;document.getElementById("lock-btn").style.display=PASSWORD_REQUIRED?"":"none";closeSettings();toast(result.restart_required?"设置已保存，端口重启后生效":"设置已保存");if(password&&!clear)setTimeout(showLogin,500);}catch(error){toast(error.message,true);}
@@ -828,6 +849,7 @@ window.doSearch=doSearch;
 window.goSearchResult=goSearchResult;
 window.reloadProject=reloadProject;
 window.openSettings=openSettings;
+window.chooseDatabaseDirectory=chooseDatabaseDirectory;
 window.closeSettings=closeSettings;
 window.saveSettings=saveSettings;
 window.openDataFolder=openDataFolder;

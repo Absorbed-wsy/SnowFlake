@@ -10,7 +10,6 @@ import argparse
 import ctypes
 import json
 import os
-import shutil
 import sys
 import threading
 import traceback
@@ -31,11 +30,9 @@ def executable_dir():
     return Path(__file__).resolve().parent
 
 
-def default_data_dir():
-    root = os.environ.get("LOCALAPPDATA")
-    if root:
-        return Path(root) / APP_NAME
-    return Path.home() / "AppData" / "Local" / APP_NAME
+def app_state_dir():
+    """Keep the launcher state beside the EXE for portable deployments."""
+    return executable_dir()
 
 
 def acquire_single_instance():
@@ -57,36 +54,73 @@ def message_box(message, title=APP_NAME, error=False):
         print("%s: %s" % (title, message), file=sys.stderr)
 
 
-def copy_legacy_database(target):
-    candidates = [executable_dir() / "snowflake.db"]
-    source_candidate = Path(__file__).resolve().parent / "snowflake.db"
-    if source_candidate not in candidates:
-        candidates.append(source_candidate)
-    for source in candidates:
-        try:
-            if source.is_file() and source.resolve() != target.resolve():
-                shutil.copy2(source, target)
-                return source
-        except OSError:
-            continue
-    return None
+def database_state_path():
+    return app_state_dir() / ".snowflake-desktop.json"
+
+
+def load_database_directory():
+    try:
+        value = json.loads(database_state_path().read_text(encoding="utf-8"))
+        configured = value.get("database_directory")
+        if configured:
+            return Path(configured).expanduser().resolve()
+        # Migrate the short-lived V2.2.2 configuration format in place.
+        legacy = value.get("database")
+        return Path(legacy).expanduser().resolve().parent if legacy else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def save_database_directory(directory):
+    try:
+        state_path = database_state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(
+            {"database_directory": str(Path(directory).resolve())}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        os.replace(temporary, state_path)
+        return True
+    except OSError:
+        return False
+
+
+def is_sqlite_database(path):
+    try:
+        with Path(path).open("rb") as handle:
+            return handle.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
 
 
 def resolve_paths(args):
+    runtime_dir = executable_dir()
     if args.db:
         database = Path(args.db).expanduser().resolve()
-        data_dir = database.parent
-    elif args.portable:
-        data_dir = executable_dir()
-        database = data_dir / "snowflake.db"
     else:
-        data_dir = default_data_dir()
-        database = data_dir / "snowflake.db"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    imported_from = None
-    if not database.exists() and not args.empty and not args.db:
-        imported_from = copy_legacy_database(database)
-    return data_dir, database, imported_from
+        database_dir = load_database_directory() or runtime_dir
+        database = database_dir / "snowflake.db"
+    database = Path(database).expanduser().resolve()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    return runtime_dir, database
+
+
+def switch_database_directory(directory):
+    database_dir = Path(directory).expanduser().resolve()
+    database_dir.mkdir(parents=True, exist_ok=True)
+    database = database_dir / "snowflake.db"
+    if database.exists() and not is_sqlite_database(database):
+        raise ValueError("所选目录中的 snowflake.db 不是有效的 SQLite 数据库")
+    with sf.WRITE_LOCK:
+        if database.exists():
+            sf.init_database(str(database))
+        else:
+            sf.configure_database(str(database))
+    if not save_database_directory(database_dir):
+        raise OSError("无法在 EXE 所在目录保存数据库目录配置")
+    return {"ok": True, "directory": str(database_dir), "database": str(database),
+            "exists": database.exists()}
 
 
 def load_window_state(path):
@@ -118,26 +152,37 @@ def save_window_state(path, window):
 
 
 class DesktopApi:
-    def __init__(self, data_dir, database):
-        self.data_dir = Path(data_dir)
+    def __init__(self, runtime_dir, database):
+        self.runtime_dir = Path(runtime_dir)
         self.database = Path(database)
+        self.window = None
 
     def open_data_folder(self):
         if os.name == "nt":
-            os.startfile(str(self.data_dir))
+            os.startfile(str(self.database.parent))
             return True
         return False
 
+    def choose_database_directory(self):
+        if self.window is None:
+            raise RuntimeError("桌面窗口尚未就绪")
+        selected = self.window.create_file_dialog(20, directory=str(self.database.parent))
+        if not selected:
+            return None
+        directory = selected[0] if isinstance(selected, (list, tuple)) else selected
+        result = switch_database_directory(directory)
+        self.database = Path(result["database"])
+        return result
+
     def app_info(self):
         return {"version": sf.APP_VERSION, "database": str(self.database),
-                "data_dir": str(self.data_dir)}
+                "data_dir": str(self.runtime_dir)}
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="SnowFlake 桌面创作工作台")
     parser.add_argument("--db", help="使用指定的 SQLite 数据库")
-    parser.add_argument("--portable", action="store_true", help="将数据库保存在 EXE 旁边")
-    parser.add_argument("--empty", action="store_true", help="首次启动时不迁移旧数据库")
+    parser.add_argument("--portable", action="store_true", help="兼容参数（桌面版默认已使用 EXE 目录）")
     parser.add_argument("--debug", action="store_true", help="启用桌面窗口调试模式")
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
@@ -149,18 +194,24 @@ def run_desktop(args):
     except ImportError as exc:
         raise RuntimeError("缺少桌面运行组件 pywebview，请先执行桌面版构建脚本。") from exc
 
-    data_dir, database, imported_from = resolve_paths(args)
-    log_path = data_dir / "snowflake-desktop.log"
+    runtime_dir, database = resolve_paths(args)
+    log_path = runtime_dir / "snowflake-desktop.log"
     sf.DESKTOP_MODE = True
-    sf.init_database(str(database))
+    sf.RUNTIME_DIR = str(runtime_dir)
+    if database.exists():
+        if not is_sqlite_database(database):
+            raise RuntimeError("当前 snowflake.db 不是有效的 SQLite 数据库")
+        sf.init_database(str(database))
+    else:
+        sf.configure_database(str(database))
     sf.load_runtime_settings()
     server = sf.create_http_server("127.0.0.1", 0)
     server_thread = threading.Thread(target=server.serve_forever, name="SnowFlakeHTTP", daemon=True)
     server_thread.start()
 
-    state_path = data_dir / "window.json"
+    state_path = runtime_dir / "window.json"
     state = load_window_state(state_path)
-    api = DesktopApi(data_dir, database)
+    api = DesktopApi(runtime_dir, database)
     url = "http://127.0.0.1:%d/" % sf.PORT
     # WebView2 may suspend rendering for a window placed far off-screen, so the
     # hidden build check uses a small on-screen position and closes immediately.
@@ -171,6 +222,7 @@ def run_desktop(args):
         width=state["width"], height=state["height"], x=window_x, y=window_y,
         min_size=(900, 640), background_color="#f4f8f2",
     )
+    api.window = window
 
     def on_closing(*_):
         save_window_state(state_path, window)
@@ -195,7 +247,7 @@ def run_desktop(args):
 
     try:
         webview.start(debug=args.debug, gui="edgechromium", private_mode=False,
-                      storage_path=str(data_dir / "webview"))
+                      storage_path=str(runtime_dir / "webview"))
     except Exception:
         log_path.write_text(traceback.format_exc(), encoding="utf-8")
         raise
@@ -204,7 +256,7 @@ def run_desktop(args):
             smoke_timer.cancel()
         server.shutdown()
         server.server_close()
-    return imported_from
+    return database
 
 
 def main(argv=None):

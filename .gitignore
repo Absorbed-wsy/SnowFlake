@@ -3,6 +3,13 @@ __pycache__/
 *.pyo
 *.tmp
 snowflake.db-journal
+*.db
+*.sqlite
+*.sqlite3
+.snowflake-desktop.json
+window.json
+snowflake-desktop.log
+webview/
 .DS_Store
 *.swp
 *~

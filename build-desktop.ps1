@@ -1,8 +1,7 @@
 param(
     [string]$Python = "python.exe",
     [string]$IndexUrl = "https://pypi.tuna.tsinghua.edu.cn/simple",
-    [switch]$SkipInstall,
-    [switch]$IncludeSeedDatabase
+    [switch]$SkipInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,15 +27,6 @@ if (-not $SkipInstall) {
 $exePath = Join-Path $projectRoot "dist\SnowFlake\SnowFlake.exe"
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "构建完成，但未找到 SnowFlake.exe"
-}
-
-if ($IncludeSeedDatabase) {
-    $sourceDatabase = Join-Path $projectRoot "snowflake.db"
-    $seedDatabase = Join-Path $projectRoot "dist\SnowFlake\snowflake.db"
-    if (-not (Test-Path -LiteralPath $sourceDatabase)) {
-        throw "已要求包含种子数据库，但项目根目录中不存在 snowflake.db"
-    }
-    Copy-Item -LiteralPath $sourceDatabase -Destination $seedDatabase -Force
 }
 
 Write-Host ""

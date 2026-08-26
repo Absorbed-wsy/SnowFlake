@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 APP_DIR = str(Path(__file__).resolve().parent)
+RUNTIME_DIR = APP_DIR
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 STATIC_DIR = RESOURCE_DIR / "static"
 DB_PATH = None
@@ -31,7 +32,7 @@ PORT = 10000
 PASSWORD_HASH = None
 VERBOSE = False
 DESKTOP_MODE = False
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.4"
 SCHEMA_VERSION = 3
 DOCUMENT_VERSION = 2
 CSRF_TOKEN = secrets.token_hex(32)
@@ -207,10 +208,18 @@ def _migrate_schema(conn, version):
         raise RuntimeError("不支持的数据库版本：%s" % version)
 
 
-def init_database(path):
+def configure_database(path):
     global DB_PATH
     DB_PATH = os.path.abspath(path)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+
+def database_exists():
+    return bool(DB_PATH and os.path.isfile(DB_PATH))
+
+
+def init_database(path):
+    configure_database(path)
     with _db_connect() as conn:
         conn.execute("PRAGMA journal_mode=DELETE")
         _create_schema(conn)
@@ -224,6 +233,13 @@ def init_database(path):
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('password_hash','')")
 
 
+def ensure_database():
+    if not DB_PATH:
+        raise RuntimeError("数据库路径尚未配置")
+    if not database_exists():
+        init_database(DB_PATH)
+
+
 def get_setting(key, default=""):
     with _db_connect() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
@@ -231,6 +247,7 @@ def get_setting(key, default=""):
 
 
 def set_setting(key, value):
+    ensure_database()
     with WRITE_LOCK, _db_connect() as conn:
         conn.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
@@ -238,6 +255,10 @@ def set_setting(key, value):
 
 def load_runtime_settings():
     global PORT, PASSWORD_HASH
+    if not database_exists():
+        PORT = 10000
+        PASSWORD_HASH = None
+        return
     try:
         PORT = max(1024, min(65535, int(get_setting("port", PORT))))
     except (TypeError, ValueError):
@@ -591,6 +612,7 @@ def _write_flow(conn, project_id, flow, updated_at):
 
 
 def create_project(name):
+    ensure_database()
     now = _db_now()
     with WRITE_LOCK, _db_connect() as conn:
         key = _unique_project_name(conn, name)
@@ -635,6 +657,8 @@ def delete_project(name, confirmation_name):
 
 
 def list_projects():
+    if not database_exists():
+        return []
     with _db_connect() as conn:
         rows = conn.execute("SELECT name,updated_at FROM projects ORDER BY name COLLATE NOCASE").fetchall()
     return [{"name": row["name"], "mtime": float(row["updated_at"])} for row in rows]
@@ -865,7 +889,9 @@ def import_database(filename, encoded):
         raise ValueError("数据库文件不能超过 100MB")
     if not payload.startswith(b"SQLite format 3\x00"):
         raise ValueError("文件不是有效的 SQLite 数据库")
-    handle = tempfile.NamedTemporaryFile(prefix="snowflake-import-", suffix=".db", delete=False)
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        prefix="snowflake-import-", suffix=".db", delete=False, dir=RUNTIME_DIR)
     temp_path = handle.name
     try:
         handle.write(payload)
@@ -883,6 +909,7 @@ def import_database(filename, encoded):
             tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not required.issubset(tables):
                 raise ValueError("数据库缺少 SnowFlake 数据表")
+            ensure_database()
             with WRITE_LOCK, _db_connect() as target:
                 for source_project in source.execute("SELECT * FROM projects ORDER BY id"):
                     name = _unique_project_name(target, source_project["name"])
@@ -1035,7 +1062,9 @@ class Handler(BaseHTTPRequestHandler):
                                  "app_version": APP_VERSION, "desktop": DESKTOP_MODE})
             elif route == "/api/settings":
                 self._json(200, {"port": PORT, "password_set": bool(PASSWORD_HASH),
-                                 "database": DB_PATH, "desktop": DESKTOP_MODE})
+                                 "database": DB_PATH,
+                                 "database_directory": os.path.dirname(DB_PATH) if DB_PATH else "",
+                                 "database_exists": database_exists(), "desktop": DESKTOP_MODE})
             elif route == "/api/search":
                 query = parse_qs(urlparse(self.path).query)
                 self._json(200, search_project(self._project_arg(), (query.get("q") or [""])[0]))
