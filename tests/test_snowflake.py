@@ -183,6 +183,41 @@ class TestDatabaseSchema(DatabaseTestCase):
         self.assertTrue(sf.verify_password("secret", sf.PASSWORD_HASH))
         self.assertNotIn("secret", sf.PASSWORD_HASH)
 
+    def test_migrates_v2_flow_columns_without_losing_rows(self):
+        legacy_path = os.path.join(self.tmpdir, "legacy-v2.db")
+        conn = sqlite3.connect(legacy_path)
+        try:
+            conn.executescript("""
+                CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                INSERT INTO metadata VALUES('schema_version','2');
+                CREATE TABLE flow_viewports(project_id INTEGER PRIMARY KEY,x REAL,y REAL,zoom REAL,updated_at REAL);
+                CREATE TABLE flow_lanes(project_id INTEGER,id TEXT,name TEXT,color TEXT,height REAL,position INTEGER,PRIMARY KEY(project_id,id));
+                CREATE TABLE flow_nodes(project_id INTEGER,id TEXT,lane_id TEXT,title TEXT,summary TEXT,details TEXT,type TEXT,status TEXT,volume TEXT,color TEXT,linked_section TEXT,tags_json TEXT,x REAL,y REAL,width REAL,PRIMARY KEY(project_id,id));
+                CREATE TABLE flow_edges(project_id INTEGER,id TEXT,source_id TEXT,target_id TEXT,type TEXT,label TEXT,color TEXT,PRIMARY KEY(project_id,id));
+                INSERT INTO flow_viewports VALUES(7,10,20,1.1,123);
+                INSERT INTO flow_lanes VALUES(7,'main','主线','green',520,0);
+                INSERT INTO flow_nodes VALUES(7,'n1','main','旧节点','','','event','idea','第一卷','neutral','', '[]',100,80,220);
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            sf.init_database(legacy_path)
+            conn = sqlite3.connect(legacy_path)
+            columns = {
+                "view": {row[1] for row in conn.execute("PRAGMA table_info(flow_viewports)")},
+                "lane": {row[1] for row in conn.execute("PRAGMA table_info(flow_lanes)")},
+                "node": {row[1] for row in conn.execute("PRAGMA table_info(flow_nodes)")},
+            }
+            self.assertEqual(conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], "3")
+            self.assertTrue({"snap_grid", "group_mode"}.issubset(columns["view"]))
+            self.assertIn("collapsed", columns["lane"])
+            self.assertIn("chapter", columns["node"])
+            self.assertEqual(conn.execute("SELECT title FROM flow_nodes WHERE id='n1'").fetchone()[0], "旧节点")
+        finally:
+            conn.close()
+            sf.DB_PATH = self.db_path
+
 
 class TestSectionStorage(DatabaseTestCase):
     def setUp(self):
@@ -330,6 +365,24 @@ class TestStoryFlow(DatabaseTestCase):
         self.assertFalse(conflict)
         self.assertEqual([node["type"] for node in saved["flow"]["nodes"]], node_types)
         self.assertEqual([edge["type"] for edge in saved["flow"]["edges"]], edge_types)
+
+    def test_enhanced_view_lane_and_node_properties_round_trip(self):
+        flow = sf.default_flow()
+        flow["viewport"].update({"snap_grid": False, "group_mode": "chapter"})
+        flow["lanes"][0]["collapsed"] = True
+        flow["nodes"] = [{
+            "id": "enhanced", "title": "章节节点", "lane": "main", "status": "fixed",
+            "volume": "第一卷", "chapter": "第三章", "tags": ["主线", "转折"],
+            "x": 100, "y": 80, "width": 360,
+        }]
+        saved, conflict = sf.save_flow("测试作品", flow)
+        self.assertFalse(conflict)
+        result = saved["flow"]
+        self.assertFalse(result["viewport"]["snap_grid"])
+        self.assertEqual(result["viewport"]["group_mode"], "chapter")
+        self.assertTrue(result["lanes"][0]["collapsed"])
+        self.assertEqual(result["nodes"][0]["chapter"], "第三章")
+        self.assertEqual(result["nodes"][0]["width"], 360)
 
 
 class TestDatabaseImport(DatabaseTestCase):

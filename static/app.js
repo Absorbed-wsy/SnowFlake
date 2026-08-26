@@ -21,6 +21,7 @@ var currentKey="preamble";
 var knownMtime=0;
 var csrfToken="";
 var PASSWORD_REQUIRED=false;
+var DESKTOP_MODE=false;
 var editMode=false;
 var dirty=false;
 var editRevision=0;
@@ -124,6 +125,7 @@ async function init(){
     var config=await getJson("/api/config");
     csrfToken=config.csrf_token||"";
     PASSWORD_REQUIRED=!!config.auth_required;
+    DESKTOP_MODE=!!config.desktop;
     document.getElementById("lock-btn").style.display=PASSWORD_REQUIRED?"":"none";
     if(PASSWORD_REQUIRED){
       var session=await fetch("/api/projects");
@@ -150,7 +152,7 @@ async function loadApp(){
   if(currentProject){
     await loadProject();
     pollTimer=setInterval(poll,2500);
-    autosaveTimer=setInterval(function(){if(editMode&&dirty)save(true);},30000);
+    autosaveTimer=setInterval(function(){if(editMode&&dirty)save(true);},DESKTOP_MODE?5000:30000);
   }else{
     renderEmptyWorkspace();
   }
@@ -756,12 +758,22 @@ function showBanner(){document.getElementById("ext-banner").classList.add("show"
 function hideBanner(){document.getElementById("ext-banner").classList.remove("show");}
 
 async function openSettings(){
-  try{var settings=await getJson("/api/settings");document.getElementById("settings-db").value=settings.database||"";document.getElementById("settings-port").value=settings.port;document.getElementById("settings-password").value="";document.getElementById("settings-password").placeholder=settings.password_set?"已设置；留空表示不修改":"留空表示不启用密码";document.getElementById("settings-clear-password").checked=false;document.getElementById("settings-modal").classList.add("show");}catch(error){toast(error.message,true);}
+  try{var settings=await getJson("/api/settings");DESKTOP_MODE=!!settings.desktop;document.getElementById("settings-db").value=settings.database||"";document.getElementById("settings-port").value=settings.port;document.getElementById("settings-port-field").style.display=DESKTOP_MODE?"none":"";document.getElementById("settings-open-folder").style.display=DESKTOP_MODE?"":"none";document.getElementById("settings-password").value="";document.getElementById("settings-password").placeholder=settings.password_set?"已设置；留空表示不修改":"留空表示不启用密码";document.getElementById("settings-clear-password").checked=false;document.getElementById("settings-modal").classList.add("show");}catch(error){toast(error.message,true);}
 }
 function closeSettings(){document.getElementById("settings-modal").classList.remove("show");}
 async function saveSettings(){
-  var payload={port:Number(document.getElementById("settings-port").value)};var password=document.getElementById("settings-password").value;var clear=document.getElementById("settings-clear-password").checked;if(clear)payload.password="";else if(password)payload.password=password;
+  var payload={};if(!DESKTOP_MODE)payload.port=Number(document.getElementById("settings-port").value);var password=document.getElementById("settings-password").value;var clear=document.getElementById("settings-clear-password").checked;if(clear)payload.password="";else if(password)payload.password=password;
   try{var response=await postJson("/api/settings",payload);var result=await response.json();if(!response.ok)throw new Error(result.error||"保存失败");PASSWORD_REQUIRED=!!result.auth_required;document.getElementById("lock-btn").style.display=PASSWORD_REQUIRED?"":"none";closeSettings();toast(result.restart_required?"设置已保存，端口重启后生效":"设置已保存");if(password&&!clear)setTimeout(showLogin,500);}catch(error){toast(error.message,true);}
+}
+
+async function openDataFolder(){
+  try{if(!window.pywebview||!window.pywebview.api)throw new Error("仅桌面版支持打开数据目录");await window.pywebview.api.open_data_folder();}catch(error){toast(error.message||"无法打开数据目录",true);}
+}
+
+async function flushAll(){
+  if(editMode&&dirty)await save(true);
+  if(window.FlowBoard)await window.FlowBoard.flush();
+  return !dirty;
 }
 
 function initTheme(){applyTheme(localStorage.getItem("sf_theme")||"green");}
@@ -818,8 +830,12 @@ window.reloadProject=reloadProject;
 window.openSettings=openSettings;
 window.closeSettings=closeSettings;
 window.saveSettings=saveSettings;
+window.openDataFolder=openDataFolder;
 window.toggleTheme=toggleTheme;
 window.SnowflakeAPI={getJson:getJson,postJson:postJson,toast:toast,textToHtml:textToHtml,escapeHtml:escapeHtml};
+window.SnowflakeFlush=flushAll;
+
+document.addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")flushAll();});
 
 init();
 })();

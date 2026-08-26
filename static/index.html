@@ -29,7 +29,7 @@
     <button id="menu-btn" aria-label="打开步骤导航" aria-expanded="false">☰</button>
     <span class="logo" aria-hidden="true">❋</span>
     <div class="brand-copy">
-      <span class="brand-kicker">V2.0 · 创作工作台</span>
+      <span class="brand-kicker">V2.2 · 桌面创作工作台</span>
       <h1>雪花写作法</h1>
     </div>
   </div>
@@ -88,12 +88,12 @@
     <div class="settings-head"><div><span>本地数据库</span><h2 id="settings-title">应用设置</h2></div><button class="ibtn" onclick="closeSettings()" aria-label="关闭设置">×</button></div>
     <div class="settings-body">
       <label class="settings-field"><span>数据库文件</span><input id="settings-db" readonly><small>正文、走向图和设置全部保存在此文件中。</small></label>
-      <label class="settings-field"><span>服务端口</span><input id="settings-port" type="number" min="1024" max="65535"><small>修改端口后需要重启工作台。</small></label>
+      <label class="settings-field" id="settings-port-field"><span>服务端口</span><input id="settings-port" type="number" min="1024" max="65535"><small>修改端口后需要重启工作台。</small></label>
       <label class="settings-field"><span>设置新密码</span><input id="settings-password" type="password" maxlength="128" placeholder="留空表示不修改" autocomplete="new-password"></label>
       <label class="settings-check"><input id="settings-clear-password" type="checkbox"><span>清除当前密码，启动后直接进入</span></label>
       <div class="settings-storage-note"><strong>统一存储</strong><span>正文、条目、走向图和应用设置全部写入当前 SQLite 数据库。</span></div>
     </div>
-    <div class="settings-actions"><button class="ghost" onclick="closeSettings()">取消</button><button class="primary" onclick="saveSettings()">保存设置</button></div>
+    <div class="settings-actions"><button class="ghost" id="settings-open-folder" onclick="openDataFolder()" style="display:none">打开数据目录</button><span class="spacer"></span><button class="ghost" onclick="closeSettings()">取消</button><button class="primary" onclick="saveSettings()">保存设置</button></div>
   </section>
 </div>
 

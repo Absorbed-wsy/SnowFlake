@@ -12,6 +12,7 @@ import os
 import secrets
 import socket
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -23,20 +24,22 @@ from urllib.parse import parse_qs, urlparse
 
 
 APP_DIR = str(Path(__file__).resolve().parent)
-STATIC_DIR = Path(APP_DIR) / "static"
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+STATIC_DIR = RESOURCE_DIR / "static"
 DB_PATH = None
 PORT = 10000
 PASSWORD_HASH = None
 VERBOSE = False
-APP_VERSION = "2.0.0"
-SCHEMA_VERSION = 2
+DESKTOP_MODE = False
+APP_VERSION = "2.2.0"
+SCHEMA_VERSION = 3
 DOCUMENT_VERSION = 2
 CSRF_TOKEN = secrets.token_hex(32)
 SESSION_SECRET = secrets.token_hex(32)
 SESSION_COOKIE = "sf_token"
 WRITE_LOCK = threading.RLock()
 
-FLOW_VERSION = 2
+FLOW_VERSION = 3
 FLOW_DEFAULT_LANE_HEIGHT = 520
 
 SECTION_DEFS = [
@@ -129,6 +132,8 @@ def _create_schema(conn):
             x REAL NOT NULL,
             y REAL NOT NULL,
             zoom REAL NOT NULL,
+            snap_grid INTEGER NOT NULL DEFAULT 1,
+            group_mode TEXT NOT NULL DEFAULT '' CHECK(group_mode IN ('','volume','chapter')),
             updated_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS flow_lanes (
@@ -137,6 +142,7 @@ def _create_schema(conn):
             name TEXT NOT NULL,
             color TEXT NOT NULL,
             height REAL NOT NULL,
+            collapsed INTEGER NOT NULL DEFAULT 0,
             position INTEGER NOT NULL,
             PRIMARY KEY(project_id,id)
         );
@@ -150,6 +156,7 @@ def _create_schema(conn):
             type TEXT NOT NULL,
             status TEXT NOT NULL,
             volume TEXT NOT NULL,
+            chapter TEXT NOT NULL DEFAULT '',
             color TEXT NOT NULL,
             linked_section TEXT NOT NULL,
             tags_json TEXT NOT NULL,
@@ -178,6 +185,28 @@ def _create_schema(conn):
     """)
 
 
+def _table_columns(conn, table):
+    return {row["name"] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+
+
+def _migrate_schema(conn, version):
+    """Apply small, forward-only migrations while preserving existing projects."""
+    current = int(version)
+    if current == 2:
+        if "snap_grid" not in _table_columns(conn, "flow_viewports"):
+            conn.execute("ALTER TABLE flow_viewports ADD COLUMN snap_grid INTEGER NOT NULL DEFAULT 1")
+        if "group_mode" not in _table_columns(conn, "flow_viewports"):
+            conn.execute("ALTER TABLE flow_viewports ADD COLUMN group_mode TEXT NOT NULL DEFAULT ''")
+        if "collapsed" not in _table_columns(conn, "flow_lanes"):
+            conn.execute("ALTER TABLE flow_lanes ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0")
+        if "chapter" not in _table_columns(conn, "flow_nodes"):
+            conn.execute("ALTER TABLE flow_nodes ADD COLUMN chapter TEXT NOT NULL DEFAULT ''")
+        current = 3
+        conn.execute("UPDATE metadata SET value=? WHERE key='schema_version'", (str(current),))
+    if current != SCHEMA_VERSION:
+        raise RuntimeError("不支持的数据库版本：%s" % version)
+
+
 def init_database(path):
     global DB_PATH
     DB_PATH = os.path.abspath(path)
@@ -186,10 +215,11 @@ def init_database(path):
         conn.execute("PRAGMA journal_mode=DELETE")
         _create_schema(conn)
         row = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
-        if row and int(row["value"]) != SCHEMA_VERSION:
-            raise RuntimeError("不支持的数据库版本：%s" % row["value"])
-        conn.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version',?)",
-                     (str(SCHEMA_VERSION),))
+        if row:
+            _migrate_schema(conn, row["value"])
+        else:
+            conn.execute("INSERT INTO metadata(key,value) VALUES('schema_version',?)",
+                         (str(SCHEMA_VERSION),))
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('port',?)", (str(PORT),))
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('password_hash','')")
 
@@ -412,11 +442,11 @@ def _unique_project_name(conn, preferred):
 def default_flow():
     return {
         "version": FLOW_VERSION,
-        "viewport": {"x": 0, "y": 0, "zoom": 1},
+        "viewport": {"x": 0, "y": 0, "zoom": 1, "snap_grid": True, "group_mode": ""},
         "lanes": [
-            {"id": "main", "name": "故事主线", "color": "green", "height": FLOW_DEFAULT_LANE_HEIGHT},
-            {"id": "mystery", "name": "谜题与伏笔", "color": "purple", "height": FLOW_DEFAULT_LANE_HEIGHT},
-            {"id": "character", "name": "人物成长", "color": "blue", "height": FLOW_DEFAULT_LANE_HEIGHT},
+            {"id": "main", "name": "故事主线", "color": "green", "height": FLOW_DEFAULT_LANE_HEIGHT, "collapsed": False},
+            {"id": "mystery", "name": "谜题与伏笔", "color": "purple", "height": FLOW_DEFAULT_LANE_HEIGHT, "collapsed": False},
+            {"id": "character", "name": "人物成长", "color": "blue", "height": FLOW_DEFAULT_LANE_HEIGHT, "collapsed": False},
         ],
         "nodes": [],
         "edges": [],
@@ -443,12 +473,15 @@ def normalize_flow(data):
     allowed_statuses = {"idea", "draft", "fixed"}
     allowed_edge_types = {"advance", "cause", "foreshadow", "conflict", "branch", "merge"}
     raw_view = data.get("viewport") if isinstance(data.get("viewport"), dict) else {}
+    group_mode = _flow_text(raw_view.get("group_mode"), 16)
     result = {
         "version": FLOW_VERSION,
         "viewport": {
             "x": _flow_number(raw_view.get("x"), 0, 0, 10000),
             "y": _flow_number(raw_view.get("y"), 0, 0, 10000),
             "zoom": _flow_number(raw_view.get("zoom"), 1, 0.2, 2.5),
+            "snap_grid": bool(raw_view.get("snap_grid", True)),
+            "group_mode": group_mode if group_mode in ("", "volume", "chapter") else "",
         },
         "lanes": [], "nodes": [], "edges": [],
     }
@@ -467,6 +500,7 @@ def normalize_flow(data):
             "name": _flow_text(raw.get("name"), 80).strip() or "未命名剧情线",
             "color": color if color in allowed_colors else "neutral",
             "height": _flow_number(raw.get("height"), FLOW_DEFAULT_LANE_HEIGHT, 280, 1200),
+            "collapsed": bool(raw.get("collapsed", False)),
         })
     if not result["lanes"]:
         result["lanes"] = default_flow()["lanes"]
@@ -495,6 +529,7 @@ def normalize_flow(data):
             "status": status if status in allowed_statuses else "idea",
             "lane": lane if lane in lane_ids else fallback_lane,
             "volume": _flow_text(raw.get("volume"), 100),
+            "chapter": _flow_text(raw.get("chapter"), 100),
             "color": color if color in allowed_colors else "neutral",
             "linked_section": _flow_text(raw.get("linked_section"), 40),
             "tags": [_flow_text(tag, 40) for tag in tags[:20] if _flow_text(tag, 40).strip()],
@@ -531,15 +566,23 @@ def _write_flow(conn, project_id, flow, updated_at):
     conn.execute("DELETE FROM flow_lanes WHERE project_id=?", (project_id,))
     conn.execute("DELETE FROM flow_viewports WHERE project_id=?", (project_id,))
     view = normalized["viewport"]
-    conn.execute("INSERT INTO flow_viewports VALUES(?,?,?,?,?)",
-                 (project_id, view["x"], view["y"], view["zoom"], updated_at))
+    conn.execute(
+        "INSERT INTO flow_viewports(project_id,x,y,zoom,snap_grid,group_mode,updated_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (project_id, view["x"], view["y"], view["zoom"], int(view["snap_grid"]),
+         view["group_mode"], updated_at))
     for position, lane in enumerate(normalized["lanes"]):
-        conn.execute("INSERT INTO flow_lanes VALUES(?,?,?,?,?,?)",
-                     (project_id, lane["id"], lane["name"], lane["color"], lane["height"], position))
+        conn.execute(
+            "INSERT INTO flow_lanes(project_id,id,name,color,height,collapsed,position) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (project_id, lane["id"], lane["name"], lane["color"], lane["height"],
+             int(lane["collapsed"]), position))
     for node in normalized["nodes"]:
-        conn.execute("INSERT INTO flow_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        conn.execute(
+            "INSERT INTO flow_nodes(project_id,id,lane_id,title,summary,details,type,status,volume,chapter,"
+            "color,linked_section,tags_json,x,y,width) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             project_id, node["id"], node["lane"], node["title"], node["summary"], node["details"],
-            node["type"], node["status"], node["volume"], node["color"], node["linked_section"],
+            node["type"], node["status"], node["volume"], node["chapter"], node["color"], node["linked_section"],
             json.dumps(node["tags"], ensure_ascii=False), node["x"], node["y"], node["width"]))
     for edge in normalized["edges"]:
         conn.execute("INSERT INTO flow_edges VALUES(?,?,?,?,?,?,?)", (
@@ -725,19 +768,22 @@ def load_flow(name):
             return {"flow": flow, "mtime": now,
                     "saved_at": datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")}
         lanes = [dict(row) for row in conn.execute(
-            "SELECT id,name,color,height FROM flow_lanes WHERE project_id=? ORDER BY position", (project["id"],))]
+            "SELECT id,name,color,height,collapsed FROM flow_lanes WHERE project_id=? ORDER BY position", (project["id"],))]
         nodes = []
         for row in conn.execute("SELECT * FROM flow_nodes WHERE project_id=?", (project["id"],)):
             nodes.append({"id": row["id"], "title": row["title"], "summary": row["summary"],
                           "details": row["details"], "type": row["type"], "status": row["status"],
-                          "lane": row["lane_id"], "volume": row["volume"], "color": row["color"],
+                          "lane": row["lane_id"], "volume": row["volume"], "chapter": row["chapter"],
+                          "color": row["color"],
                           "linked_section": row["linked_section"], "tags": json.loads(row["tags_json"]),
                           "x": row["x"], "y": row["y"], "width": row["width"]})
         edges = [{"id": row["id"], "from": row["source_id"], "to": row["target_id"],
                   "type": row["type"], "label": row["label"], "color": row["color"]}
                  for row in conn.execute("SELECT * FROM flow_edges WHERE project_id=?", (project["id"],))]
         flow = normalize_flow({"version": FLOW_VERSION,
-                               "viewport": {"x": view["x"], "y": view["y"], "zoom": view["zoom"]},
+                               "viewport": {"x": view["x"], "y": view["y"], "zoom": view["zoom"],
+                                            "snap_grid": bool(view["snap_grid"]),
+                                            "group_mode": view["group_mode"]},
                                "lanes": lanes, "nodes": nodes, "edges": edges})
         mtime = float(view["updated_at"])
     return {"flow": flow, "mtime": mtime,
@@ -781,20 +827,30 @@ def search_project(name, query):
 
 def _external_flow(conn, project_id):
     view = conn.execute("SELECT * FROM flow_viewports WHERE project_id=?", (project_id,)).fetchone()
+    view_columns = set(view.keys()) if view else set()
+    lane_columns = _table_columns(conn, "flow_lanes")
+    node_columns = _table_columns(conn, "flow_nodes")
     lanes = [dict(row) for row in conn.execute(
-        "SELECT id,name,color,height FROM flow_lanes WHERE project_id=? ORDER BY position", (project_id,))]
+        "SELECT * FROM flow_lanes WHERE project_id=? ORDER BY position", (project_id,))]
+    if "collapsed" not in lane_columns:
+        for lane in lanes:
+            lane["collapsed"] = False
     nodes = []
     for row in conn.execute("SELECT * FROM flow_nodes WHERE project_id=?", (project_id,)):
         nodes.append({"id": row["id"], "title": row["title"], "summary": row["summary"],
                       "details": row["details"], "type": row["type"], "status": row["status"],
-                      "lane": row["lane_id"], "volume": row["volume"], "color": row["color"],
+                      "lane": row["lane_id"], "volume": row["volume"],
+                      "chapter": row["chapter"] if "chapter" in node_columns else "", "color": row["color"],
                       "linked_section": row["linked_section"], "tags": json.loads(row["tags_json"]),
                       "x": row["x"], "y": row["y"], "width": row["width"]})
     edges = [{"id": row["id"], "from": row["source_id"], "to": row["target_id"],
               "type": row["type"], "label": row["label"], "color": row["color"]}
              for row in conn.execute("SELECT * FROM flow_edges WHERE project_id=?", (project_id,))]
     return normalize_flow({"version": FLOW_VERSION,
-                           "viewport": {"x": view["x"], "y": view["y"], "zoom": view["zoom"]} if view else {},
+                           "viewport": {"x": view["x"], "y": view["y"], "zoom": view["zoom"],
+                                        "snap_grid": bool(view["snap_grid"]) if "snap_grid" in view_columns else True,
+                                        "group_mode": view["group_mode"] if "group_mode" in view_columns else ""}
+                           if view else {},
                            "lanes": lanes, "nodes": nodes, "edges": edges})
 
 
@@ -819,8 +875,9 @@ def import_database(filename, encoded):
             if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise ValueError("导入数据库完整性检查失败")
             version = source.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
-            if not version or int(version["value"]) != SCHEMA_VERSION:
-                raise ValueError("只能导入 SnowFlake 结构化数据库 v%d" % SCHEMA_VERSION)
+            source_version = int(version["value"]) if version else 0
+            if source_version not in (2, SCHEMA_VERSION):
+                raise ValueError("只能导入 SnowFlake 结构化数据库 v2～v%d" % SCHEMA_VERSION)
             required = {"projects", "sections", "section_items", "flow_viewports", "flow_lanes",
                         "flow_nodes", "flow_edges"}
             tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -915,6 +972,15 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def create_http_server(host="127.0.0.1", port=None):
+    """Create the HTTP service and publish its actual bound port."""
+    global PORT
+    requested_port = PORT if port is None else int(port)
+    server = ExclusiveThreadingHTTPServer((host, requested_port), Handler)
+    PORT = int(server.server_address[1])
+    return server
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "SnowFlake/" + APP_VERSION
 
@@ -966,9 +1032,10 @@ class Handler(BaseHTTPRequestHandler):
             elif route == "/api/config":
                 self._json(200, {"csrf_token": CSRF_TOKEN, "auth_required": bool(PASSWORD_HASH),
                                  "storage": "sqlite", "schema_version": SCHEMA_VERSION,
-                                 "app_version": APP_VERSION})
+                                 "app_version": APP_VERSION, "desktop": DESKTOP_MODE})
             elif route == "/api/settings":
-                self._json(200, {"port": PORT, "password_set": bool(PASSWORD_HASH), "database": DB_PATH})
+                self._json(200, {"port": PORT, "password_set": bool(PASSWORD_HASH),
+                                 "database": DB_PATH, "desktop": DESKTOP_MODE})
             elif route == "/api/search":
                 query = parse_qs(urlparse(self.path).query)
                 self._json(200, search_project(self._project_arg(), (query.get("q") or [""])[0]))
@@ -1054,14 +1121,18 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(200, {"ok": True, "project": result})
             elif route == "/api/settings":
-                try:
-                    port = int(data.get("port", PORT))
-                except (TypeError, ValueError):
-                    raise ValueError("端口必须是数字")
-                if not 1024 <= port <= 65535:
-                    raise ValueError("端口范围应为 1024～65535")
-                set_setting("port", port)
-                restart_required = port != PORT
+                if DESKTOP_MODE:
+                    port = PORT
+                    restart_required = False
+                else:
+                    try:
+                        port = int(data.get("port", PORT))
+                    except (TypeError, ValueError):
+                        raise ValueError("端口必须是数字")
+                    if not 1024 <= port <= 65535:
+                        raise ValueError("端口范围应为 1024～65535")
+                    set_setting("port", port)
+                    restart_required = port != PORT
                 if "password" in data:
                     password = str(data.get("password") or "")
                     if len(password) > 128:
@@ -1103,22 +1174,30 @@ def lan_ip():
 
 
 def main():
-    global VERBOSE
+    global VERBOSE, PORT
     parser = argparse.ArgumentParser(description="雪花写作法本地小说设计工作台")
     parser.add_argument("--db", default=None, help="SQLite 数据库路径（默认：程序目录/snowflake.db）")
+    parser.add_argument("--port", type=int, default=None, help="临时覆盖服务端口")
+    parser.add_argument("--lan", action="store_true", help="允许局域网设备访问")
     parser.add_argument("-v", "--verbose", action="store_true", help="打印 HTTP 访问日志")
     args = parser.parse_args()
     VERBOSE = args.verbose
     database_path = os.path.abspath(args.db) if args.db else os.path.join(APP_DIR, "snowflake.db")
     init_database(database_path)
     load_runtime_settings()
-    server = ExclusiveThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    if args.port is not None:
+        if not 0 <= args.port <= 65535:
+            parser.error("端口范围应为 0～65535")
+        PORT = args.port
+    host = "0.0.0.0" if args.lan else "127.0.0.1"
+    server = create_http_server(host, PORT)
     ip = lan_ip()
     print("=" * 56)
     print("  ❋ 雪花写作法工作台已启动")
     print("  版本:   V%s" % APP_VERSION)
     print("  本机:   http://localhost:%d" % PORT)
-    print("  局域网: http://%s:%d" % (ip, PORT))
+    if args.lan:
+        print("  局域网: http://%s:%d" % (ip, PORT))
     print("  数据库: %s（结构版本 %d）" % (DB_PATH, SCHEMA_VERSION))
     print("  认证: %s" % ("已启用" if PASSWORD_HASH else "无"))
     projects = [item["name"] for item in list_projects()]

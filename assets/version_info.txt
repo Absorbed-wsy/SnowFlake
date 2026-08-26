@@ -1,0 +1,27 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2, 2, 0, 0),
+    prodvers=(2, 2, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        u'080404b0',
+        [StringStruct(u'CompanyName', u'SnowFlake'),
+         StringStruct(u'FileDescription', u'SnowFlake 本地小说设计工作台'),
+         StringStruct(u'FileVersion', u'2.2.0'),
+         StringStruct(u'InternalName', u'SnowFlake'),
+         StringStruct(u'LegalCopyright', u'MIT License'),
+         StringStruct(u'OriginalFilename', u'SnowFlake.exe'),
+         StringStruct(u'ProductName', u'SnowFlake'),
+         StringStruct(u'ProductVersion', u'2.2.0')])
+    ]),
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)
